@@ -292,6 +292,58 @@ const parsePickcenter = (j, hAb) => {
   return out.length ? out : null;
 };
 
+/* One /summary call carries the whole picture: odds by book, ESPN's own
+   projection, injuries, ATS records, recent form, weather, head-to-head. */
+const parseSummary = (j, hAb, aAb) => {
+  const pick = parsePickcenter(j, hAb);
+  const pr = j.predictor || {};
+  const proj = (x) => {
+    const v = parseFloat((x || {}).gameProjection);
+    return isFinite(v) ? v : null;
+  };
+  const inj = (j.injuries || []).map((t) => ({
+    ab: ((t.team || {}).abbreviation) || "",
+    list: (t.injuries || []).map((i) => ({
+      who: ((i.athlete || {}).displayName) || "",
+      pos: (((i.athlete || {}).position) || {}).abbreviation || "",
+      status: i.status || "",
+    })).filter((x) => x.who),
+  })).filter((t) => t.list.length);
+
+  const atsOf = (ab) => {
+    const t = (j.againstTheSpread || []).find(
+      (x) => ((x.team || {}).abbreviation) === ab);
+    if (!t) return null;
+    const r = (t.records || [])[0];
+    return r ? (r.summary || null) : null;
+  };
+  const formOf = (ab) => {
+    const t = (j.lastFiveGames || []).find(
+      (x) => ((x.team || {}).abbreviation) === ab);
+    if (!t) return null;
+    return (t.events || []).slice(0, 5).map((e) => ({
+      res: e.gameResult || "", score: e.score || "", opp: e.opponent
+        ? ((e.opponent.abbreviation) || "") : "",
+    })).filter((x) => x.res);
+  };
+
+  const gi = j.gameInfo || {};
+  const w = gi.weather || {};
+  return {
+    pick,
+    espnWp: proj(pr.homeTeam),
+    injuries: inj,
+    hAts: atsOf(hAb), aAts: atsOf(aAb),
+    hForm: formOf(hAb), aForm: formOf(aAb),
+    weather: w.temperature != null || w.displayValue
+      ? { t: w.temperature ?? w.highTemperature ?? null, d: w.displayValue || "" } : null,
+    venue: (gi.venue || {}).fullName || null,
+    city: ((gi.venue || {}).address || {}).city || null,
+    attendance: gi.attendance || null,
+    series: (((j.seasonseries || [])[0] || {}).summary) || null,
+  };
+};
+
 const parseRanks = (j) => {
   const ap = (j.rankings || []).find((r) => /ap/i.test(r.shortName || r.name || "")) ||
              (j.rankings || [])[0];
@@ -651,6 +703,21 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .fl { font-family:'Oswald',sans-serif; font-weight:600; font-size:16px; display:block;
   margin-top:3px; line-height:1.4; }
 .fl .sep { color:var(--edge); font-weight:400; }
+.verdict { border-left:3px solid; border-radius:0 3px 3px 0; padding:13px 14px; margin-bottom:12px;
+  background:var(--bg); }
+.verdict.p { border-left-color:var(--turf); } .verdict.n { border-left-color:var(--turf); }
+.verdict.z { border-left-color:var(--dim); }
+.vh { display:block; font-family:'Oswald',sans-serif; font-weight:600; font-size:16px;
+  line-height:1.25; margin-bottom:5px; }
+.verdict.p .vh, .verdict.n .vh { color:var(--turf); }
+.verdict.z .vh { color:var(--fg); }
+.vb { display:block; font-size:12.5px; line-height:1.55; color:#B9C3D1; }
+.strip { font-size:11.5px; color:var(--dim); margin:0 0 14px; line-height:1.5; }
+.form { display:flex; gap:4px; flex-wrap:wrap; margin:8px 0; }
+.pill { font-family:'Oswald',sans-serif; font-size:10px; padding:3px 6px; border-radius:2px;
+  letter-spacing:.03em; }
+.pill.w { background:#13301F; color:#5FD69B; } .pill.l { background:#2E1512; color:#E08376; }
+.side .sname { font-family:'Oswald',sans-serif; font-weight:600; font-size:17px; display:block; }
 .facts-wrap { margin-bottom:14px; }
 .side { background:var(--bg); border-left:3px solid; border-radius:0 3px 3px 0;
   padding:12px 14px; margin-bottom:8px; }
@@ -745,420 +812,6 @@ function Track({ marks }) {
 
 const KEYS = ["dk", "fd", "mgm", "czr", "pin"];
 const nameOf = (k) => (BOOKS.find((b) => b.k === k) || {}).n || k;
-
-function PullBar({ game, entry, patch, live }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-  const [meta, setMeta] = useState(null);
-  const [bad, setBad] = useState([]);
-  const [now, setNow] = useState(() => Date.now());
-  const running = React.useRef(false);
-
-  const oddsAt = entry.oddsAt || 0;
-  const window = freshFor(game.kickAt, now);
-  const stale = !oddsAt || now - oddsAt > window;
-
-  // Free path: ESPN prices the same game across several books.
-  const pullFree = async (auto) => {
-    if (running.current || !game.espnId) return false;
-    running.current = true;
-    setBusy(true); if (!auto) { setErr(null); setBad([]); }
-    try {
-      const books = parsePickcenter(await espnGet("/summary?event=" + game.espnId), game.hAb);
-      if (!books) return false;
-      const ml = {}, sp = {}, tot = {}, names = {};
-      for (const b of books) {
-        names[b.k] = b.name;
-        if (b.mlA != null && b.mlB != null) ml[b.k] = { a: String(b.mlA), b: String(b.mlB) };
-        if (b.sp != null)
-          sp[b.k] = { l: String(b.sp), a: String(b.spA ?? -110), b: String(b.spB ?? -110) };
-        if (b.tot != null)
-          tot[b.k] = { l: String(b.tot), a: String(b.ovr ?? -110), b: String(b.und ?? -110) };
-      }
-      patch((prev) => ({
-        ...prev,
-        ml: { ...(prev.ml || {}), ...ml },
-        sp: { ...(prev.sp || {}), ...sp },
-        tot: { ...(prev.tot || {}), ...tot },
-        bookNames: { ...(prev.bookNames || {}), ...names },
-        oddsAt: Date.now(), oddsSrc: "espn",
-      }));
-      setMeta({ at: new Date(), n: books.length, sources: "ESPN", free: true });
-      return true;
-    } catch (e) { return false; }
-    finally { setBusy(false); running.current = false; }
-  };
-
-  const pull = async (auto) => {
-    if (await pullFree(auto)) return;
-    if (running.current) return;
-    running.current = true;
-    setBusy(true); setErr(null); if (!auto) { setMeta(null); setBad([]); }
-    try {
-      const prompt =
-        `Find current published sportsbook odds for the college football game ` +
-        `${game.away} at ${game.home}, kickoff ${game.kick} 2026. The HOME team is ` +
-        `${game.home} (${game.hAb}). Search odds comparison sites for book-by-book numbers.\n\n` +
-        `Reply with ONLY a JSON object, no fences, no preamble:\n` +
-        `{"books":[{"k":"dk|fd|mgm|czr|pin","sp":home spread,"spA":away price,` +
-        `"spB":home price,"tot":total,"ovr":over price,"und":under price,` +
-        `"mlA":away moneyline,"mlB":home moneyline}],` +
-        `"openSp":opening home spread,"openTot":opening total,` +
-        `"asOf":"how current","sources":"sites used"}\n\n` +
-        `SIGN RULE: "sp" is the HOME team's spread. Negative means ${game.hAb} is favored. ` +
-        `Before you answer, check this against the moneyline: if "mlB" is more negative than ` +
-        `"mlA", then ${game.hAb} is favored and "sp" MUST be negative. Getting this backwards ` +
-        `is the most common error — verify it.\n` +
-        `Use null for anything you cannot find. Never estimate, model, or invent a number. ` +
-        `Only include books you found real published numbers for.`;
-
-      const r = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6", max_tokens: 1000,
-          messages: [{ role: "user", content: prompt }],
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-        }),
-      });
-      if (!r.ok) throw new Error("bad response");
-      const j = await r.json();
-      const txt = (j.content || []).filter((c) => c.type === "text")
-        .map((c) => c.text).join("\n").replace(/```json|```/g, "").trim();
-      const m = txt.match(/\{[\s\S]*\}/);
-      if (!m) throw new Error("no json");
-      const d = JSON.parse(m[0]);
-      const books = (Array.isArray(d.books) ? d.books : []).filter((b) => KEYS.includes(b.k));
-      if (!books.length) {
-        setErr("No published book-by-book odds found. That's the honest result — a made-up number would be worse.");
-        setBusy(false); running.current = false; return;
-      }
-
-      const ml = { ...(entry.ml || {}) }, sp = { ...(entry.sp || {}) }, tot = { ...(entry.tot || {}) };
-      const clash = [];
-
-      for (const b of books) {
-        if (b.mlA != null && b.mlB != null) ml[b.k] = { a: String(b.mlA), b: String(b.mlB) };
-        if (b.tot != null && b.ovr != null && b.und != null)
-          tot[b.k] = { l: String(b.tot), a: String(b.ovr), b: String(b.und) };
-        if (b.sp != null && b.spA != null && b.spB != null) {
-          // Does the spread point at the same team as the moneyline?
-          const mlFav = b.mlA != null && b.mlB != null
-            ? (toProb(b.mlB) > toProb(b.mlA) ? "h" : "a") : null;
-          const spFav = Number(b.sp) < 0 ? "h" : "a";
-          if (mlFav && mlFav !== spFav) clash.push(b.k);
-          else sp[b.k] = { l: String(b.sp), a: String(b.spA), b: String(b.spB) };
-        }
-      }
-      if (d.openSp != null) sp.open = { l: String(d.openSp), a: "-110", b: "-110" };
-      if (d.openTot != null) tot.open = { l: String(d.openTot), a: "-110", b: "-110" };
-
-      patch((prev) => ({ ...prev, ml, sp, tot, oddsAt: Date.now() }));
-      setBad(clash);
-      setMeta({ at: new Date(), n: books.length, sources: d.sources, asOf: d.asOf,
-                openAssumed: d.openSp != null || d.openTot != null });
-    } catch (e) {
-      setErr("Couldn't pull odds. Books often hide numbers from scrapers this far out.");
-    } finally { setBusy(false); running.current = false; }
-  };
-
-  // Tick so the displayed age stays honest without a re-render from elsewhere.
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 20000);
-    return () => clearInterval(t);
-  }, []);
-
-  // Auto-refresh only maintains odds you already pulled once. Firing a
-  // paid search just because a game got opened is how usage disappears.
-  useEffect(() => {
-    if (!live || !oddsAt) return;
-    if (stale) pull(true);
-    const t = setInterval(() => {
-      if (!running.current && Date.now() - (entry.oddsAt || 0) > freshFor(game.kickAt, Date.now()))
-        pull(true);
-    }, 30000);
-    return () => clearInterval(t);
-  }, [live, game.id, !!oddsAt]);
-
-  return (
-    <>
-      <button className="pull" onClick={() => pull(false)} disabled={busy}>
-        {busy ? "Loading the books…"
-          : !oddsAt ? "Load every book (free from ESPN first)"
-          : stale ? `Odds ${shortAge(now - oddsAt)} · refresh`
-          : `Odds ${shortAge(now - oddsAt)} · up to date`}
-      </button>
-      {oddsAt > 0 && (
-        <p className="src" style={{ marginTop: 6 }}>
-          {live
-            ? `Auto-refreshing about every ${Math.round(window / 60000)} min while this game is open — ${
-                (new Date(game.kickAt) - now) / 3600000 < 6
-                  ? "tightened because kickoff is close"
-                  : "loose because kickoff is days away"}.`
-            : "Live refresh is off. These numbers will age."}
-        </p>
-      )}
-      {err && <p className="err">{err}</p>}
-      {bad.length > 0 && (
-        <div className="arb" style={{ borderColor: "#FF5A47", background: "#241010" }}>
-          <b>{bad.map(nameOf).join(", ")}</b> came back with a spread pointing at the opposite
-          team from its own moneyline. Left blank rather than filled — one of the two numbers is
-          wrong and there's no way to tell which from here.
-        </div>
-      )}
-      {meta && (
-        <p className="src">
-          {meta.free ? "Free from ESPN — filled " : "Filled "}{meta.n} book{meta.n === 1 ? "" : "s"}
-          {meta.asOf ? " · " + meta.asOf : ""}{meta.sources ? " · via " + meta.sources : ""} ·
-          pulled {meta.at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.
-          {meta.openAssumed && " Opening lines assume standard −110 juice, which is convention, not a quote."}
-          {" "}Check anything that looks off against your own account before betting it.
-        </p>
-      )}
-    </>
-  );
-}
-
-// Shared disk cache. Every pull here is a web-search round trip costing
-// 20-60s, so nothing should be fetched twice inside its useful lifetime.
-const cache = {
-  async get(key, ttl) {
-    try {
-      const r = await window.storage.get("linedesk:c:" + key);
-      if (!r || !r.value) return null;
-      const o = JSON.parse(r.value);
-      return { data: o.d, at: o.t, stale: Date.now() - o.t > ttl };
-    } catch (e) { return null; }
-  },
-  async set(key, data) {
-    try {
-      await window.storage.set("linedesk:c:" + key, JSON.stringify({ d: data, t: Date.now() }));
-    } catch (e) { /* memory only */ }
-  },
-};
-
-const askClaude = async (prompt, useSearch = true, ms = 60000) => {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
-  try {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    signal: ctrl.signal,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6", max_tokens: 1000,
-      messages: [{ role: "user", content: prompt }],
-      ...(useSearch ? { tools: [{ type: "web_search_20250305", name: "web_search" }] } : {}),
-    }),
-  });
-  if (!r.ok) throw new Error("bad response");
-  const j = await r.json();
-  return (j.content || []).filter((c) => c.type === "text")
-    .map((c) => c.text).join("\n").trim();
-  } finally { clearTimeout(timer); }
-};
-
-const askJson = async (prompt, useSearch = true) => {
-  const txt = (await askClaude(prompt, useSearch)).replace(/```json|```/g, "").trim();
-  const m = txt.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("no json");
-  return JSON.parse(m[0]);
-};
-
-// Kickoff drives everything about a game's live state.
-const phaseOf = (kickAt, now) => {
-  if (!kickAt) return "pre";
-  const mins = (now - new Date(kickAt)) / 60000;
-  if (mins < 0) return "pre";
-  if (mins < 260) return "live";
-  return "post";
-};
-
-const untilKick = (kickAt, now) => {
-  const mins = Math.round((new Date(kickAt) - now) / 60000);
-  if (mins < 60) return mins + " min";
-  const h = Math.round(mins / 60);
-  return h < 48 ? h + " hr" : Math.round(h / 24) + " days";
-};
-
-function TeamFacts({ game, info, save, favAb }) {
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-
-  const favIsHome = favAb === game.hAb;
-  const favName = favIsHome ? game.home : game.away;
-  const dogName = favIsHome ? game.away : game.home;
-  const dogAb = favIsHome ? game.aAb : game.hAb;
-
-  const pull = async () => {
-    setBusy(true); setErr(null);
-    try {
-      const d = await askJson(
-        `Research both teams in the 2026 college football game ${game.away} at ${game.home}, ` +
-        `kickoff ${game.kick}. ${favName} is favored; ${dogName} is the underdog.\n\n` +
-        `Reply with ONLY JSON, no fences:\n` +
-        `{"fav":{"rec":"current record","conf":"conference","rank":AP rank or null,` +
-        `"facts":["3 to 5 short factual items"]},` +
-        `"dog":{"rec":"","conf":"","rank":null,"facts":[]},` +
-        `"series":"one sentence on the all-time series, or say plainly if they have never met",` +
-        `"last":"most recent meeting with year and score, or null","sources":"sites used"}\n\n` +
-        `Each fact under 15 words. Draw from: last season's record and how it ended, head ` +
-        `coach and whether they're new, the starting quarterback, a clear strength, a clear ` +
-        `weakness, any significant injury or transfer loss, division level (FBS or FCS). ` +
-        `Use null or an empty array for anything you cannot verify. Never invent a record, ` +
-        `a coach, or a player.`
-      );
-      save({ ...d, favAb, at: Date.now() });
-    } catch (e) { setErr("Couldn't load team facts."); }
-    finally { setBusy(false); }
-  };
-
-  if (!info || info.favAb !== favAb) {
-    return (
-      <>
-        <button className="pull" onClick={pull} disabled={busy} style={{ marginTop: 0 }}>
-          {busy ? "Researching both teams…" : "Load the facts on both teams"}
-        </button>
-        {err && <p className="err">{err}</p>}
-      </>
-    );
-  }
-
-  const side = (role, ab, name, d) => (
-    <div className="side" style={{ borderLeftColor: col(ab) }}>
-      <div className="shead">
-        <span className="role">{role}</span>
-        <span className="sname" style={{ color: col(ab) }}>
-          {d && d.rank ? <span className="rank" style={{ background: col(ab) }}>#{d.rank}</span> : null}
-          {name}
-        </span>
-        <span className="srec">
-          {[d && d.rec, d && d.conf].filter(Boolean).join(" · ") || "record unavailable"}
-        </span>
-      </div>
-      {d && Array.isArray(d.facts) && d.facts.filter(Boolean).length > 0 ? (
-        <ul className="facts">
-          {d.facts.filter(Boolean).map((f, i) => <li key={i}>{f}</li>)}
-        </ul>
-      ) : (
-        <p className="nofact">Nothing verifiable turned up on this team.</p>
-      )}
-    </div>
-  );
-
-  return (
-    <div className="facts-wrap">
-      {side("Favorite", favAb, favName, info.fav)}
-      {side("Underdog", dogAb, dogName, info.dog)}
-      {(info.series || info.last) && (
-        <div className="series">
-          {info.series && <p><span>Series</span>{info.series}</p>}
-          {info.last && <p><span>Last met</span>{info.last}</p>}
-        </div>
-      )}
-      <p className="src">
-        {info.sources ? "Via " + info.sources + ". " : ""}Unverified web research.{" "}
-        <button className="relink" onClick={pull} disabled={busy}>
-          {busy ? "refreshing…" : "refresh"}</button>
-      </p>
-    </div>
-  );
-}
-
-function Top25() {
-  const [busy, setBusy] = useState(false);
-  const [poll, setPoll] = useState(null);
-  const [err, setErr] = useState(null);
-
-  const pull = async () => {
-    setBusy(true); setErr(null);
-    // Free path first: ESPN publishes the poll, no key and no quota.
-    try {
-      const val = parseRanks(await espnGet("/rankings"));
-      if (val && val.teams.length) {
-        setPoll({ ...val, at: Date.now(), src: "ESPN" });
-        cache.set("poll", { ...val, src: "ESPN" });
-        setBusy(false); return;
-      }
-    } catch (e) { /* fall through to the paid path */ }
-    try {
-      // Compact rows: a 25-object payload runs close to the token ceiling
-      // and truncates into unparseable JSON.
-      const d = await askJson(
-        `Find the most recent Associated Press Top 25 college football poll for the 2026 ` +
-        `season. Today is September 1, 2026, so a Week 1 or Week 2 poll may have replaced ` +
-        `the preseason one — use the newest you can find.\n\n` +
-        `Reply with ONLY JSON, no fences. Use compact arrays:\n` +
-        `{"w":"which poll, e.g. Preseason or Week 2",` +
-        `"t":[[1,"Ohio State","OSU","1-0"],[2,"Oregon","ORE","1-0"]],"s":"sites used"}\n\n` +
-        `All 25 in order, each as [rank, name, abbreviation, record]. Never invent a ranking.`
-      );
-      const teams = (d.t || []).map((r) => ({ r: r[0], n: r[1], ab: r[2], rec: r[3] }));
-      if (!teams.length) throw new Error("empty");
-      const val = { which: d.w, teams, sources: d.s, src: "web search" };
-      setPoll({ ...val, at: Date.now() });
-      cache.set("poll", val);
-    } catch (e) {
-      setErr("Couldn't pull the poll. It searches the web, which takes a while and sometimes fails.");
-    } finally { setBusy(false); }
-  };
-
-  useEffect(() => {
-    let dead = false;
-    (async () => {
-      const c = await cache.get("poll", 6 * 3600000);
-      if (dead) return;
-      if (c) {
-        setPoll({ ...c.data, at: c.at });
-        if (!c.stale) return;   // fresh enough, don't spend a minute re-fetching
-      }
-      pull();
-    })();
-    return () => { dead = true; };
-  }, []);
-
-  const playing = new Set(UPCOMING.flatMap((g) => [g.hAb, g.aAb]));
-
-  return (
-    <>
-      {!poll && busy && (
-        <>
-          <p className="empty">Searching for the current poll. This is a live web search, so
-            give it up to a minute.</p>
-          {[...Array(6)].map((_, i) => <div className="skel" key={i} />)}
-        </>
-      )}
-      {err && !poll && <p className="err">{err}</p>}
-      {poll && Array.isArray(poll.teams) && (
-        <>
-          <p className="empty" style={{ paddingBottom: 10 }}>
-            {poll.which || "AP Top 25"} · fetched{" "}
-            {new Date(poll.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
-            {poll.src ? " · " + poll.src : ""}
-            {poll.sources ? " · via " + poll.sources : ""}
-            {busy ? " · refreshing…" : ""}
-          </p>
-          {poll.teams.map((t) => (
-            <div className="gm" key={t.r} style={{ borderLeftColor: t.c || col(t.ab), cursor: "default", padding: "10px 14px" }}>
-              <span className="rnum">{t.r}</span>
-              <span className="who">
-                <span className="abbr" style={{ color: t.c || col(t.ab) }}>{t.n}</span>
-                {playing.has(t.ab) && <span className="meta">Playing on your board this week</span>}
-              </span>
-              <span className="rt"><span className="sub">{t.rec || ""}</span></span>
-            </div>
-          ))}
-          <p className="empty">
-            {poll.teams.every((t) => !playing.has(t.ab))
-              ? "None of these teams are on this week's board. Rankings are about seeding and playoff position, not point spreads — a ranked team is priced the same as anyone else once the number is posted."
-              : "Ranked teams on your board are flagged above."}
-            {" "}Cached six hours; the poll changes weekly.
-          </p>
-        </>
-      )}
-    </>
-  );
-}
 
 const KEYNUM = [3, 7, 10, 14, 17, 21];
 
@@ -1305,230 +958,198 @@ function ReadGame({ game, ctx, saved, save }) {
   );
 }
 
-function Shopper({ game, entry, patch, devigKey, benchmark, live }) {
+function Insight({ game, entry, patch, devigKey, benchmark }) {
   const [mk, setMk] = useState("sp");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [showGrid, setShowGrid] = useState(false);
+  const loaded = React.useRef(false);
+
+  const sum = entry.sum || null;
   const def = MARKETS.find((m) => m.k === mk);
   const rows = entry[mk] || {};
   const devig = devigKey === "power" ? devigPower : devigMult;
   const res = useMemo(() => shop(mk, game, rows, devig, benchmark),
     [mk, rows, devigKey, benchmark, game]);
 
+  // Everything below loads itself, free, the moment the game opens.
+  const load = async () => {
+    if (!game.espnId) { setErr("no-espn"); return; }
+    setBusy(true); setErr(null);
+    try {
+      const d = parseSummary(await espnGet("/summary?event=" + game.espnId), game.hAb, game.aAb);
+      const ml = {}, sp = {}, tot = {}, names = {};
+      for (const bk of d.pick || []) {
+        names[bk.k] = bk.name;
+        if (bk.mlA != null && bk.mlB != null) ml[bk.k] = { a: String(bk.mlA), b: String(bk.mlB) };
+        if (bk.sp != null) sp[bk.k] = { l: String(bk.sp), a: String(bk.spA ?? -110), b: String(bk.spB ?? -110) };
+        if (bk.tot != null) tot[bk.k] = { l: String(bk.tot), a: String(bk.ovr ?? -110), b: String(bk.und ?? -110) };
+      }
+      patch((prev) => ({
+        ...prev, sum: d, bookNames: { ...(prev.bookNames || {}), ...names },
+        ml: { ...(prev.ml || {}), ...ml }, sp: { ...(prev.sp || {}), ...sp },
+        tot: { ...(prev.tot || {}), ...tot },
+        oddsAt: Date.now(),
+      }));
+    } catch (e) { setErr("fetch"); }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => {
+    if (loaded.current) return;
+    loaded.current = true;
+    if (!sum) load();
+  }, [game.id]);
+
   const set = (k, f, v) =>
     patch((prev) => {
-      const cur = (prev[mk] || {});
+      const cur = prev[mk] || {};
       return { ...prev, [mk]: { ...cur, [k]: { ...(cur[k] || {}), [f]: v } } };
     });
-
-  const hasData = Object.keys(rows).some(
-    (k) => rows[k] && (rows[k].a || rows[k].b || rows[k].l));
-  const [showGrid, setShowGrid] = useState(false);
-  const gridOpen = showGrid || hasData;
 
   const mLabel = (mu) => {
     const L = -mu;
     return `${L <= 0 ? game.hAb : game.aAb} −${trim(Math.abs(L))}`;
   };
-  const mColor = (mu) => col(-mu <= 0 ? game.hAb : game.aAb);
+  const mColor = (mu) => (-mu <= 0 ? tc(game, "h") : tc(game, "a"));
   const evTxt = (e) => (e >= 0 ? "+" : "") + (e * 100).toFixed(1) + "%";
   const evCls = (e) => (e > 0.005 ? "p" : e < -0.005 ? "n" : "z");
   const pct = (x) => (x * 100).toFixed(1) + "%";
 
-  // Who's favored: the market when we have it, the model otherwise.
-  const favMu = res && mk !== "tot" ? res.cons : (game.wp != null ? -modelLine(game.wp) : null);
-  const favAb = favMu == null ? game.hAb : (favMu > 0 ? game.hAb : game.aAb);
-
   const feedMu = game.wp != null ? -modelLine(game.wp) : null;
-  const altWp = parseFloat(entry.altWp);
-  const altMu = isFinite(altWp) && altWp > 0 && altWp < 100 ? -modelLine(altWp) : null;
+  const espnMu = sum && sum.espnWp != null ? -modelLine(sum.espnWp) : null;
+  const mktMu = res && mk === "sp" ? res.cons : null;
+
+  // The verdict is arithmetic on the numbers above, not a generated opinion.
+  const verdict = () => {
+    if (mktMu == null) return null;
+    const models = [feedMu, espnMu].filter((x) => x != null);
+    if (!models.length) return null;
+    const avg = models.reduce((a, b) => a + b, 0) / models.length;
+    const band = models.length > 1 ? Math.abs(models[0] - models[1]) : 3;
+    const gap = avg - mktMu;
+    const key = [3, 7, 10, 14].find((k) => Math.abs(Math.abs(mktMu) - k) < 1);
+    if (Math.abs(gap) <= Math.max(band / 2, 1.2)) {
+      return { tone: "z", head: "No edge here.",
+        body: `The market sits inside where the models already are. A ${Math.abs(gap).toFixed(1)}-point ` +
+          `difference is smaller than the ${band.toFixed(1)} points the models disagree with each other by.` };
+    }
+    const side = gap > 0 ? game.home : game.away;
+    return { tone: gap > 0 ? "p" : "n",
+      head: `Models like ${side} by ${Math.abs(gap).toFixed(1)} more than the market.`,
+      body: `Models average ${mLabel(avg)}, market is ${mLabel(mktMu)}.` +
+        (key ? ` But the line is sitting on ${key}, where this app's math is least reliable — discount it.` : "") };
+  };
+  const v = verdict();
 
   const marks = [];
   if (mk === "sp") {
     if (feedMu != null) marks.push({ k: "Feed", v: feedMu, txt: mLabel(feedMu), c: mColor(feedMu) });
-    if (altMu != null) marks.push({ k: "2nd model", v: altMu, txt: mLabel(altMu), c: mColor(altMu) });
-    if (res && res.openAnchor != null)
-      marks.push({ k: "Open", v: res.openAnchor, txt: mLabel(res.openAnchor), c: "#E3B448" });
-    if (res) marks.push({ k: "Market", v: res.cons, txt: mLabel(res.cons), c: "#FFFFFF" });
-  } else if (mk === "tot") {
-    if (res && res.openAnchor != null)
-      marks.push({ k: "Open", v: res.openAnchor, txt: res.openAnchor.toFixed(1), c: "#E3B448" });
-    if (res) marks.push({ k: "Market", v: res.cons, txt: res.cons.toFixed(1), c: "#FFFFFF" });
+    if (espnMu != null) marks.push({ k: "ESPN", v: espnMu, txt: mLabel(espnMu), c: mColor(espnMu) });
+    if (res && res.openAnchor != null) marks.push({ k: "Open", v: res.openAnchor, txt: mLabel(res.openAnchor), c: "#E3B448" });
+    if (mktMu != null) marks.push({ k: "Market", v: mktMu, txt: mLabel(mktMu), c: "#FFFFFF" });
   }
 
-  const middle = () => {
-    if (!res || mk === "ml") return null;
-    const a = res.bestA.L, b = res.bestB.L;
-    if (a == null || b == null || !(a < b)) return null;
-    const lo = -b, hi = -a;
-    const wins = [];
-    for (let n = Math.ceil(lo); n < hi; n++) if (n > lo) wins.push(n);
-    if (!wins.length) return null;
-    const what = mk === "sp"
-      ? `${game.home} wins by ${wins.join(" or ")}`
-      : `the game lands on ${wins.join(" or ")}`;
+  const injOf = (ab) => {
+    const t = (sum && sum.injuries || []).find((x) => x.ab === ab);
+    return t ? t.list : [];
+  };
+
+  const teamBlock = (ab, name, side) => {
+    const ats = sum ? (side === "h" ? sum.hAts : sum.aAts) : null;
+    const form = sum ? (side === "h" ? sum.hForm : sum.aForm) : null;
+    const inj = injOf(ab);
     return (
-      <div className="arb">
-        <b>Middle.</b> Your two best numbers sit on different lines, so taking both sides leaves
-        a window where they both cash — {what}. Outside it, one leg wins and one loses and
-        you're out the juice on the loser. It also means the cost figure below isn't a clean
-        hold, since the two prices aren't on the same number.
+      <div className="side" style={{ borderLeftColor: tc(game, side) }}>
+        <span className="sname" style={{ color: tc(game, side) }}>{name}</span>
+        <span className="srec">
+          {[side === "h" ? game.hRec : game.aRec, ats ? "ATS " + ats : null]
+            .filter(Boolean).join(" · ") || "no record yet"}
+        </span>
+        {form && form.length > 0 && (
+          <div className="form">
+            {form.map((f, i) => (
+              <span key={i} className={"pill " + (f.res === "W" ? "w" : "l")}>
+                {f.res} {f.score}{f.opp ? " " + f.opp : ""}
+              </span>
+            ))}
+          </div>
+        )}
+        {inj.length > 0 ? (
+          <ul className="facts">
+            {inj.slice(0, 5).map((i, n) => (
+              <li key={n}><b>{i.who}</b> {i.pos ? "(" + i.pos + ")" : ""} — {i.status}</li>
+            ))}
+          </ul>
+        ) : sum ? <p className="nofact">No injuries reported.</p> : null}
       </div>
     );
   };
 
-  const movement = () => {
-    if (!res || res.openAnchor == null) return null;
-    const d = res.cons - res.openAnchor;
-    if (mk === "ml") {
-      const pp = d * 100;
-      return <div className="move">Opened {game.hAb} {fmtOdds(toAmerican(res.openAnchor))}, now{" "}
-        {fmtOdds(toAmerican(res.cons))} — <b>{Math.abs(pp).toFixed(1)} pts of win probability</b>{" "}
-        toward {pp > 0 ? game.home : game.away}.</div>;
-    }
-    if (mk === "sp") {
-      return <div className="move">Opened {mLabel(res.openAnchor)}, now {mLabel(res.cons)} —{" "}
-        <b>{Math.abs(d).toFixed(1)} points</b> toward {d > 0 ? game.home : game.away}.
-        {Math.abs(d) >= 2 && " That's a real move, not noise."}</div>;
-    }
-    return <div className="move">Opened {res.openAnchor.toFixed(1)}, now {res.cons.toFixed(1)} —{" "}
-      <b>{Math.abs(d).toFixed(1)} points {d > 0 ? "up" : "down"}</b>.
-      {Math.abs(d) >= 2.5 && " Money has been landing on one side all week."}</div>;
-  };
-
   return (
     <div className="desk">
-      <div style={{ marginBottom: 14 }}>
-        <Seg value={mk} onChange={setMk} options={MARKETS.map((m) => ({ v: m.k, l: m.label }))} />
-      </div>
-
-      {game.espnOdds && (game.espnOdds.details || game.espnOdds.ou != null) && (
-        <div className="freeline">
-          <span className="role">Free line · {game.espnOdds.book}</span>
-          <span className="fl">
-            {game.espnOdds.details || "no spread"}
-            {game.espnOdds.ou != null && <>  <span className="sep">/</span>  O/U {game.espnOdds.ou}</>}
-            {game.espnOdds.mlH != null && <>  <span className="sep">/</span>  {game.aAb} {fmtOdds(game.espnOdds.mlA)} · {game.hAb} {fmtOdds(game.espnOdds.mlH)}</>}
-          </span>
-          <span className="role" style={{ marginTop: 6 }}>
-            One book, no vig removal. Enough to anchor a number without spending anything.
-          </span>
-        </div>
+      {busy && !sum && (
+        <>
+          <p className="empty">Loading the game from ESPN…</p>
+          {[...Array(3)].map((_, i) => <div className="skel" key={i} />)}
+        </>
       )}
 
-      <div style={{ marginBottom: 18 }}>
-        <TeamFacts game={game} info={entry.info} favAb={favAb}
-          save={(v) => patch((prev) => ({ ...prev, info: v }))} />
-        <PullBar game={game} entry={entry} patch={patch} live={live} />
-      </div>
-
-      {mk === "sp" && (
-        <div className="field">
-          <h4>Where everyone has this game</h4>
-          <div className="grid" style={{ gridTemplateColumns: "1fr 62px", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "#7E8899" }}>
-              Second model win % for {game.hAb} — try ESPN's Matchup Predictor
-            </span>
-            <input className="f" inputMode="decimal" placeholder="92.7" value={entry.altWp || ""}
-              onChange={(e) => patch({ ...entry, altWp: e.target.value })} />
-          </div>
-          <Track marks={marks} />
-          {feedMu != null && altMu != null && (
-            <p className="gap">
-              The two models sit {Math.abs(feedMu - altMu).toFixed(1)} points apart. That gap is
-              your uncertainty band — a market number inside it isn't an edge, it's a coin flip
-              between two guesses.
-            </p>
-          )}
-        </div>
-      )}
-
-      {mk === "tot" && marks.length >= 2 && (
-        <div className="field">
-          <h4>Total, open to now</h4>
-          <Track marks={marks} />
-        </div>
-      )}
-
-      <button className="collapse" onClick={() => setShowGrid(!showGrid)}>
-        {gridOpen ? "▾" : "▸"} Odds grid
-        {hasData ? ` · ${res ? res.count : 0} books filled` : " · empty"}
-      </button>
-
-      {gridOpen && (<>
-      <div className={"grid cap " + (def.line ? "w4" : "w3")}>
-        <span>Book</span>
-        {def.line && <span>{mk === "sp" ? "Home" : "Total"}</span>}
-        <span>{mk === "tot" ? "Over" : game.aAb}</span>
-        <span>{mk === "tot" ? "Under" : game.hAb}</span>
-      </div>
-
-      <div className={"grid openrow " + (def.line ? "w4" : "w3")}>
-        <span className="bk op">OPEN</span>
-        {def.line && <input className="f" inputMode="decimal" value={(rows.open || {}).l || ""}
-          placeholder={mk === "sp" ? "line" : "total"} onChange={(e) => set("open", "l", e.target.value)} />}
-        <input className="f" inputMode="text" value={(rows.open || {}).a || ""} placeholder="odds"
-          onChange={(e) => set("open", "a", e.target.value)} />
-        <input className="f" inputMode="text" value={(rows.open || {}).b || ""} placeholder="odds"
-          onChange={(e) => set("open", "b", e.target.value)} />
-      </div>
-
-      {BOOKS.map((bk) => {
-        const r = rows[bk.k] || {};
-        return (
-          <div className={"grid " + (def.line ? "w4" : "w3")} key={bk.k} style={{ marginBottom: 6 }}>
-            <span className="bk" title={(entry.bookNames || {})[bk.k] || bk.n}>
-              {((entry.bookNames || {})[bk.k] || bk.s).slice(0, 5)}
-            </span>
-            {def.line && <input className="f" inputMode="decimal" value={r.l || ""}
-              placeholder={mk === "sp" ? "line" : "total"} onChange={(e) => set(bk.k, "l", e.target.value)} />}
-            <input className="f" inputMode="text" value={r.a || ""} placeholder="odds"
-              data-best={res && res.bestA.bk.k === bk.k ? "1" : "0"}
-              onChange={(e) => set(bk.k, "a", e.target.value)} />
-            <input className="f" inputMode="text" value={r.b || ""} placeholder="odds"
-              data-best={res && res.bestB.bk.k === bk.k ? "1" : "0"}
-              onChange={(e) => set(bk.k, "b", e.target.value)} />
-          </div>
-        );
-      })}
-
-      {!res && <p className="empty">Empty. Use the pull above, or type a book in by hand.</p>}
-      </>)}
-
-      {!gridOpen && !hasData && (
-        <p className="empty" style={{ paddingTop: 4 }}>
-          No odds loaded. Plenty of games never get a posted market at all — small-school
-          matchups mostly don't.
+      {err && !sum && (
+        <p className="empty">
+          {err === "no-espn"
+            ? "This game came from the built-in snapshot, so there's no ESPN record to pull."
+            : "ESPN didn't return a game record. Nothing to show but the odds grid below."}
         </p>
       )}
 
-      {res && (
+      {v && (
+        <div className={"verdict " + v.tone}>
+          <span className="vh">{v.head}</span>
+          <span className="vb">{v.body}</span>
+        </div>
+      )}
+
+      {sum && (sum.venue || sum.weather) && (
+        <p className="strip">
+          {sum.venue}{sum.city ? " · " + sum.city : ""}
+          {sum.weather && <> · {sum.weather.t != null ? sum.weather.t + "°" : ""} {sum.weather.d}</>}
+          {sum.series && <> · {sum.series}</>}
+        </p>
+      )}
+
+      <div style={{ margin: "4px 0 14px" }}>
+        <Seg value={mk} onChange={setMk} options={MARKETS.map((m) => ({ v: m.k, l: m.label }))} />
+      </div>
+
+      {res ? (
         <div className="out">
           <p className="hint">
-            {res.count === 1 ? "One book so far — that's its own fair line, not a comparison."
-              : `Best of ${res.count} books, priced against the ${res.usePin ? "Pinnacle" : "consensus"} number.`}
+            Best of {res.count} book{res.count === 1 ? "" : "s"}, priced against the{" "}
+            {res.usePin ? "Pinnacle" : "consensus"} number. Loaded free from ESPN.
           </p>
           <div className="pick">
             <span className="lft">
-              <b style={{ color: mk === "tot" ? "#F2F5FA" : col(game.aAb) }}>{res.sideA}</b>{" "}
+              <b style={{ color: mk === "tot" ? "#F2F5FA" : tc(game, "a") }}>{res.sideA}</b>{" "}
               <span className="num">
                 {def.line && (mk === "sp" ? (res.bestA.L > 0 ? "−" : "+") + trim(Math.abs(res.bestA.L)) : "o" + res.bestA.L)}{" "}
                 {fmtOdds(parseFloat(res.bestA.oa))}
               </span>
-              <em>{res.bestA.bk.n}</em>
+              <em>{(entry.bookNames || {})[res.bestA.bk.k] || res.bestA.bk.n}</em>
             </span>
             <span className={"ev " + evCls(res.bestA.evA)}>{evTxt(res.bestA.evA)}</span>
           </div>
           <div className="pick">
             <span className="lft">
-              <b style={{ color: mk === "tot" ? "#F2F5FA" : col(game.hAb) }}>{res.sideB}</b>{" "}
+              <b style={{ color: mk === "tot" ? "#F2F5FA" : tc(game, "h") }}>{res.sideB}</b>{" "}
               <span className="num">
                 {def.line && (mk === "sp" ? (res.bestB.L > 0 ? "+" : "−") + trim(Math.abs(res.bestB.L)) : "u" + res.bestB.L)}{" "}
                 {fmtOdds(parseFloat(res.bestB.ob))}
               </span>
-              <em>{res.bestB.bk.n}</em>
+              <em>{(entry.bookNames || {})[res.bestB.bk.k] || res.bestB.bk.n}</em>
             </span>
             <span className={"ev " + evCls(res.bestB.evB)}>{evTxt(res.bestB.evB)}</span>
           </div>
-
           <div className="rule">
             <div className="kv"><span>{res.usePin ? "Pinnacle" : "Consensus"}</span>
               <b style={{ color: mk === "sp" ? mColor(res.cons) : "#F2F5FA" }}>
@@ -1542,50 +1163,91 @@ function Shopper({ game, entry, patch, devigKey, benchmark, live }) {
                 <b style={{ color: "#FF5A47" }}>{pct(res.worstHold)}</b></div>
             )}
           </div>
-
-          {res.count > 1 && res.worstHold - res.shoppedCost > 0.0005 && (
-            <div className="save">
-              Shopping saves <b>{((res.worstHold - res.shoppedCost) * 100).toFixed(1)}%</b> against
-              your worst book — about ${((res.worstHold - res.shoppedCost) * 100).toFixed(2)} on
-              every $100 through, before you've handicapped anything.
-            </div>
-          )}
-          {res.shoppedCost < 0 && (
-            <div className="arb">
-              Both sides together price under 100% — an arbitrage on paper. Check for a stale
-              number or a typo first. Books void obvious errors and limit accounts that hit them.
-            </div>
-          )}
-          {middle()}
           {res.bestA.evA < 0 && res.bestB.evB < 0 && (
             <p className="hint" style={{ margin: "11px 0 0", paddingTop: 11, borderTop: "1px solid #28303F" }}>
-              Both sides negative is the normal result, not a malfunction — every price here
-              carries vig, and the benchmark is these same books averaged together. A bet only
-              clears zero when one book sits far enough off the others to beat its own juice.
-              {!res.priced.some((q) => q.bk.k === "pin") &&
-                " Pinnacle is empty; with a sharp book as the benchmark instead of a retail average, these numbers start meaning something."}
+              Both sides negative is normal — every price carries vig and the benchmark is these
+              same books averaged. A bet clears zero only when one book sits far enough off the
+              others to beat its own juice.
             </p>
           )}
-          {movement()}
+        </div>
+      ) : !busy && (
+        <p className="empty">No book has posted this game. Common for small-school matchups —
+          they often never get a market at all.</p>
+      )}
+
+      {mk === "sp" && marks.length >= 2 && (
+        <div className="field" style={{ marginTop: 16 }}>
+          <h4>Models against the market</h4>
+          <Track marks={marks} />
         </div>
       )}
 
+      {(sum || game.hRec) && (
+        <div className="facts-wrap" style={{ marginTop: 16 }}>
+          {teamBlock(game.aAb, game.away, "a")}
+          {teamBlock(game.hAb, game.home, "h")}
+        </div>
+      )}
+
+      <button className="collapse" onClick={() => setShowGrid(!showGrid)}>
+        {showGrid ? "▾" : "▸"} Odds grid{res ? ` · ${res.count} books` : " · empty"} · edit by hand
+      </button>
+      {showGrid && (<>
+        <div className={"grid cap " + (def.line ? "w4" : "w3")}>
+          <span>Book</span>
+          {def.line && <span>{mk === "sp" ? "Home" : "Total"}</span>}
+          <span>{mk === "tot" ? "Over" : game.aAb}</span>
+          <span>{mk === "tot" ? "Under" : game.hAb}</span>
+        </div>
+        <div className={"grid openrow " + (def.line ? "w4" : "w3")}>
+          <span className="bk op">OPEN</span>
+          {def.line && <input className="f" inputMode="decimal" value={(rows.open || {}).l || ""}
+            placeholder="line" onChange={(e) => set("open", "l", e.target.value)} />}
+          <input className="f" inputMode="text" value={(rows.open || {}).a || ""} placeholder="odds"
+            onChange={(e) => set("open", "a", e.target.value)} />
+          <input className="f" inputMode="text" value={(rows.open || {}).b || ""} placeholder="odds"
+            onChange={(e) => set("open", "b", e.target.value)} />
+        </div>
+        {BOOKS.map((bk) => {
+          const r = rows[bk.k] || {};
+          return (
+            <div className={"grid " + (def.line ? "w4" : "w3")} key={bk.k} style={{ marginBottom: 6 }}>
+              <span className="bk" title={(entry.bookNames || {})[bk.k] || bk.n}>
+                {((entry.bookNames || {})[bk.k] || bk.s).slice(0, 5)}
+              </span>
+              {def.line && <input className="f" inputMode="decimal" value={r.l || ""}
+                placeholder="line" onChange={(e) => set(bk.k, "l", e.target.value)} />}
+              <input className="f" inputMode="text" value={r.a || ""} placeholder="odds"
+                data-best={res && res.bestA.bk.k === bk.k ? "1" : "0"}
+                onChange={(e) => set(bk.k, "a", e.target.value)} />
+              <input className="f" inputMode="text" value={r.b || ""} placeholder="odds"
+                data-best={res && res.bestB.bk.k === bk.k ? "1" : "0"}
+                onChange={(e) => set(bk.k, "b", e.target.value)} />
+            </div>
+          );
+        })}
+      </>)}
+
+      <button className="pull" onClick={load} disabled={busy}>
+        {busy ? "Refreshing…" : "Refresh from ESPN (free)"}
+      </button>
+
       <ReadGame game={game} saved={entry.read}
-        save={(v) => patch((prev) => ({ ...prev, read: v }))}
+        save={(x) => patch((prev) => ({ ...prev, read: x }))}
         ctx={[
           `Game: ${game.away} at ${game.home}, ${game.kick}`,
-          feedMu != null ? `Feed model: ${mLabel(feedMu)} (${game.wp}% home win probability)` : null,
-          altMu != null ? `Second model: ${mLabel(altMu)}` : null,
-          res && mk === "sp" ? `Market consensus spread: ${mLabel(res.cons)}` : null,
-          res && mk === "tot" ? `Market consensus total: ${res.cons.toFixed(1)}` : null,
-          res && res.openAnchor != null && mk === "sp"
-            ? `Opening line: ${mLabel(res.openAnchor)} (moved ${(res.cons - res.openAnchor).toFixed(1)})` : null,
-          res ? `Books found: ${res.count}. Cost if shopped ${(res.shoppedCost * 100).toFixed(1)}%, worst book ${(res.worstHold * 100).toFixed(1)}%.` : null,
-          res ? `Best available: ${res.sideA} at ${fmtOdds(parseFloat(res.bestA.oa))} (${res.bestA.bk.n}), EV ${(res.bestA.evA * 100).toFixed(1)}%; ${res.sideB} at ${fmtOdds(parseFloat(res.bestB.ob))} (${res.bestB.bk.n}), EV ${(res.bestB.evB * 100).toFixed(1)}%.` : null,
-          entry.info && entry.info.series ? `Series: ${entry.info.series}` : null,
-          entry.info && entry.info.last ? `Last meeting: ${entry.info.last}` : null,
-          entry.info && Array.isArray(entry.info.notes) ? entry.info.notes.filter(Boolean).join(" ") : null,
-          `Model caveat: spreads are converted through a normal curve with a ${SIG_M}-point standard deviation, which misprices margins near 3 and 7.`,
+          feedMu != null ? `Feed model: ${mLabel(feedMu)}` : null,
+          espnMu != null ? `ESPN projection: ${mLabel(espnMu)} (${sum.espnWp}% home)` : null,
+          mktMu != null ? `Market consensus: ${mLabel(mktMu)}` : null,
+          res ? `${res.count} books. Shopped cost ${(res.shoppedCost * 100).toFixed(1)}%.` : null,
+          sum && sum.hAts ? `${game.hAb} ATS ${sum.hAts}` : null,
+          sum && sum.aAts ? `${game.aAb} ATS ${sum.aAts}` : null,
+          (sum && sum.injuries || []).map((t) =>
+            `${t.ab} out/questionable: ${t.list.map((i) => i.who + " (" + i.status + ")").join(", ")}`).join("\n") || null,
+          sum && sum.weather ? `Weather: ${sum.weather.t ?? ""} ${sum.weather.d}` : null,
+          sum && sum.series ? `Series: ${sum.series}` : null,
+          `Caveat: spreads convert through a normal curve (σ=${SIG_M}), which misprices 3 and 7.`,
         ].filter(Boolean).join("\n")} />
     </div>
   );
@@ -1804,8 +1466,8 @@ function LineDesk() {
                     </span>
                   </button>
                   {open === g.id && (
-                    <Shopper game={g} entry={entries[g.id] || {}} patch={patch(g.id)}
-                      devigKey={devigKey} benchmark={benchmark} live={live} />
+                    <Insight game={g} entry={entries[g.id] || {}} patch={patch(g.id)}
+                      devigKey={devigKey} benchmark={benchmark} />
                   )}
                 </div>
               );
