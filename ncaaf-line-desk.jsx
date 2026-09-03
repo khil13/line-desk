@@ -712,6 +712,136 @@ function Track({ marks }) {
 const KEYS = ["dk", "fd", "mgm", "czr", "pin"];
 const nameOf = (k) => (BOOKS.find((b) => b.k === k) || {}).n || k;
 
+/* Restored: an over-eager cleanup slice removed these along with the
+   components they supported. */
+
+// Shared disk cache — a web-search pull costs 20-60s, so nothing gets
+// fetched twice inside its useful lifetime.
+const cache = {
+  async get(key, ttl) {
+    try {
+      const r = await window.storage.get("linedesk:c:" + key);
+      if (!r || !r.value) return null;
+      const o = JSON.parse(r.value);
+      return { data: o.d, at: o.t, stale: Date.now() - o.t > ttl };
+    } catch (e) { return null; }
+  },
+  async set(key, data) {
+    try {
+      await window.storage.set("linedesk:c:" + key, JSON.stringify({ d: data, t: Date.now() }));
+    } catch (e) { /* memory only */ }
+  },
+};
+
+const askClaude = async (prompt, useSearch = true, ms = 60000) => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6", max_tokens: 1000,
+        messages: [{ role: "user", content: prompt }],
+        ...(useSearch ? { tools: [{ type: "web_search_20250305", name: "web_search" }] } : {}),
+      }),
+    });
+    if (!r.ok) throw new Error("bad response");
+    const j = await r.json();
+    return (j.content || []).filter((c) => c.type === "text")
+      .map((c) => c.text).join("\n").trim();
+  } finally { clearTimeout(timer); }
+};
+
+const askJson = async (prompt, useSearch = true) => {
+  const txt = (await askClaude(prompt, useSearch)).replace(/```json|```/g, "").trim();
+  const m = txt.match(/\{[\s\S]*\}/);
+  if (!m) throw new Error("no json");
+  return JSON.parse(m[0]);
+};
+
+// Kickoff drives live state when ESPN's own status field isn't available.
+const phaseOf = (kickAt, now) => {
+  if (!kickAt) return "pre";
+  const mins = (now - new Date(kickAt)) / 60000;
+  if (mins < 0) return "pre";
+  if (mins < 260) return "live";
+  return "post";
+};
+
+const untilKick = (kickAt, now) => {
+  const mins = Math.round((new Date(kickAt) - now) / 60000);
+  if (mins < 60) return mins + " min";
+  const h = Math.round(mins / 60);
+  return h < 48 ? h + " hr" : Math.round(h / 24) + " days";
+};
+
+function Top25() {
+  const [busy, setBusy] = useState(false);
+  const [poll, setPoll] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const pull = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const val = parseRanks(await espnGet("/rankings"));
+      if (val && val.teams.length) {
+        setPoll({ ...val, at: Date.now() });
+        cache.set("poll", val);
+      } else throw new Error("empty");
+    } catch (e) {
+      setErr("ESPN didn't return the poll.");
+    } finally { setBusy(false); }
+  };
+
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const c = await cache.get("poll", 6 * 3600000);
+      if (dead) return;
+      if (c) { setPoll({ ...c.data, at: c.at }); if (!c.stale) return; }
+      pull();
+    })();
+    return () => { dead = true; };
+  }, []);
+
+  return (
+    <>
+      {!poll && busy && (
+        <>
+          <p className="empty">Loading the poll…</p>
+          {[...Array(6)].map((_, i) => <div className="skel" key={i} />)}
+        </>
+      )}
+      {err && !poll && <p className="empty">{err}</p>}
+      {poll && Array.isArray(poll.teams) && (
+        <>
+          <p className="empty" style={{ paddingBottom: 10 }}>
+            {poll.which || "AP Top 25"} · free from ESPN · fetched{" "}
+            {new Date(poll.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            {busy ? " · refreshing…" : ""}
+          </p>
+          {poll.teams.map((t) => (
+            <div className="gm" key={t.r}
+              style={{ borderLeftColor: t.c || col(t.ab), cursor: "default", padding: "10px 14px" }}>
+              <span className="rnum">{t.r}</span>
+              <span className="who">
+                <span className="abbr" style={{ color: t.c || col(t.ab) }}>{t.n}</span>
+              </span>
+              <span className="rt"><span className="sub">{t.rec || ""}</span></span>
+            </div>
+          ))}
+          <p className="empty">
+            Rankings drive seeding and playoff position, not point spreads. A ranked team is
+            priced the same as anyone else once the number is posted. Cached six hours.
+          </p>
+        </>
+      )}
+    </>
+  );
+}
+
 const KEYNUM = [3, 7, 10, 14, 17, 21];
 
 /* Scan every game for how far apart the books are. Where they disagree
