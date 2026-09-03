@@ -1,105 +1,4 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<meta name="theme-color" content="#0B0E14" />
-<title>Line Desk</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Barlow:wght@400;500;600;700&display=swap" />
-<style>
-  html,body { margin:0; padding:0; background:#0B0E14; }
-  #root { min-height:100vh; }
-  .keybar { background:#141924; border-bottom:1px solid #28303F; padding:8px 16px;
-    font-family:'Barlow',system-ui,sans-serif; font-size:12px; color:#7E8899;
-    display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .keybar summary { cursor:pointer; list-style:none; color:#7E8899; padding:2px 0; }
-  .keybar summary::-webkit-details-marker { display:none; }
-  .keybar details { width:100%; }
-  .keybar .note { display:block; margin:8px 0; max-width:70ch; line-height:1.5; }
-  .keybar .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .keybar input { flex:1; min-width:180px; background:#0B0E14; border:1px solid #28303F;
-    color:#F2F5FA; font-family:inherit; font-size:12px; padding:7px 9px; border-radius:3px; }
-  .keybar button { background:#35D07F; border:0; color:#06210F; font-family:'Oswald',sans-serif;
-    text-transform:uppercase; letter-spacing:.06em; font-size:11px; padding:8px 14px;
-    border-radius:3px; cursor:pointer; }
-  .keybar b { color:#F2F5FA; }
-</style>
-</head>
-<body>
-<div class="keybar">
-  <details>
-    <summary>▸ Anthropic API key (optional — everything below runs free without one)</summary>
-    <span class="note">Odds, scores, schedule, records and rankings all come from ESPN at no
-    cost. A key only adds team-facts research and the per-game read. It is stored in this
-    browser and never committed — but anything typed here is visible to scripts on the page,
-    so don't paste a key into a copy you didn't build yourself.</span>
-    <span class="row">
-      <input id="k" type="password" placeholder="sk-ant-... (leave blank to run free)" autocomplete="off" />
-      <button onclick="saveKey()">Save</button>
-      <button onclick="clearKey()" style="background:#28303F;color:#F2F5FA">Clear</button>
-    </span>
-  </details>
-</div>
-<div id="root"></div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-
-<script>
-  // localStorage stands in for the artifact host's storage API.
-  window.storage = {
-    async get(key) {
-      const v = localStorage.getItem("ld:" + key);
-      if (v === null) throw new Error("missing");
-      return { key, value: v };
-    },
-    async set(key, value) { localStorage.setItem("ld:" + key, value); return { key, value }; },
-    async delete(key) { localStorage.removeItem("ld:" + key); return { key, deleted: true }; },
-    async list(prefix) {
-      const keys = Object.keys(localStorage)
-        .filter(k => k.startsWith("ld:" + (prefix || "")))
-        .map(k => k.slice(3));
-      return { keys };
-    },
-  };
-
-  document.getElementById("k").value = localStorage.getItem("ld:apikey") || "";
-  function saveKey() {
-    const v = document.getElementById("k").value.trim();
-    if (v && !v.startsWith("sk-ant-")) { alert("That doesn't look like an Anthropic key."); return; }
-    localStorage.setItem("ld:apikey", v);
-    alert(v ? "Saved to this browser's local storage only. It is never sent anywhere except api.anthropic.com, and never written to the file."
-            : "Cleared. Running on the free ESPN path.");
-  }
-  function clearKey() {
-    localStorage.removeItem("ld:apikey");
-    document.getElementById("k").value = "";
-    alert("Key removed from this browser.");
-  }
-
-  // In the artifact the host authenticates for you. Standalone, attach the key here.
-  const realFetch = window.fetch.bind(window);
-  window.fetch = function (url, opts) {
-    if (typeof url === "string" && url.includes("api.anthropic.com")) {
-      const key = localStorage.getItem("ld:apikey");
-      if (!key) return Promise.reject(new Error("no api key"));
-      opts = opts || {};
-      opts.headers = Object.assign({}, opts.headers, {
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      });
-    }
-    return realFetch(url, opts);
-  };
-</script>
-
-<script type="text/babel" data-presets="react">
-const { useState, useMemo, useEffect } = React;
-
+import React, { useState, useMemo, useEffect } from "react";
 
 /* Schedules, scores and model win probabilities are real, from a live
    sports feed, captured at SNAPSHOT. Odds are yours to enter. */
@@ -1591,7 +1490,7 @@ function Shopper({ game, entry, patch, devigKey, benchmark, live }) {
   );
 }
 
-function LineDesk() {
+export default function LineDesk() {
   const [tab, setTab] = useState("upcoming");
   const [open, setOpen] = useState(null);
   const [devigKey, setDevigKey] = useState("power");
@@ -1908,8 +1807,3 @@ function LineDesk() {
     </div>
   );
 }
-
-ReactDOM.createRoot(document.getElementById("root")).render(<LineDesk />);
-</script>
-</body>
-</html>
