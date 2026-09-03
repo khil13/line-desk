@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+node_modules/
+*.log
+
+# Never commit credentials. The app stores keys in browser localStorage.
+.env
+.env.*
+*.key
+secrets.*
