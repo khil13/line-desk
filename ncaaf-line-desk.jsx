@@ -401,7 +401,84 @@ const MARGIN_MULT = {
   22: 0.80, 23: 0.82, 24: 1.10, 25: 0.86, 26: 0.84, 27: 0.90, 28: 1.08,
   31: 0.98, 35: 0.96,
 };
-const mult = (m) => MARGIN_MULT[Math.abs(m)] ?? 0.92;
+/* Once calibrated against real results this holds the measured table and
+   the built-in estimates above stop being used. */
+let EMP = null;
+const mult = (m) => {
+  const a = Math.abs(m);
+  if (EMP && EMP.mult[a] != null) return EMP.mult[a];
+  return MARGIN_MULT[a] ?? 0.92;
+};
+
+/* Walk ESPN's scoreboard week by week and count how real games actually
+   finished. Free, and it turns the model from my estimate into your data. */
+async function calibrate(years, onProgress) {
+  const tasks = [];
+  for (const y of years) for (let w = 1; w <= 16; w++) tasks.push([y, w]);
+  const margins = [], totals = [];
+  let done = 0, idx = 0;
+
+  const worker = async () => {
+    while (idx < tasks.length) {
+      const [y, w] = tasks[idx++];
+      try {
+        const j = await espnGet(
+          `/scoreboard?dates=${y}&seasontype=2&week=${w}&limit=400`, 20000);
+        for (const ev of j.events || []) {
+          const st = (ev.status && ev.status.type) || {};
+          if (!st.completed) continue;
+          const cs = ((ev.competitions || [])[0] || {}).competitors || [];
+          const H = cs.find((x) => x.homeAway === "home");
+          const A = cs.find((x) => x.homeAway === "away");
+          if (!H || !A) continue;
+          const hs = Number(H.score), as = Number(A.score);
+          if (!isFinite(hs) || !isFinite(as)) continue;
+          margins.push(hs - as); totals.push(hs + as);
+        }
+      } catch (e) { /* a missing week shouldn't sink the run */ }
+      onProgress(++done, tasks.length);
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+
+  const n = margins.length;
+  if (n < 400) throw new Error("only " + n + " games");
+
+  const abs = margins.map(Math.abs);
+  const counts = {};
+  for (const m of abs) counts[m] = (counts[m] || 0) + 1;
+  const freq = (m) => (counts[m] || 0) / n;
+
+  // Leave-one-out smoothing: compare each margin against its neighbours,
+  // so the result measures the spike itself rather than the overall shape.
+  const baseline = (m) => {
+    let num = 0, den = 0;
+    for (const k of [m - 3, m - 2, m - 1, m + 1, m + 2, m + 3]) {
+      if (k < 0) continue;
+      const w = Math.exp(-0.5 * Math.pow((k - m) / 2.5, 2));
+      num += w * freq(k); den += w;
+    }
+    return den ? num / den : 0;
+  };
+
+  const table = {};
+  for (let m = 0; m <= 45; m++) {
+    const b = baseline(m);
+    table[m] = b > 0 ? Math.max(0.30, Math.min(3.5, freq(m) / b)) : 1;
+  }
+
+  const mean = margins.reduce((a, b) => a + b, 0) / n;
+  const sd = Math.sqrt(margins.reduce((a, b) => a + (b - mean) * (b - mean), 0) / n);
+  const tMean = totals.reduce((a, b) => a + b, 0) / totals.length;
+  const tSd = Math.sqrt(totals.reduce((a, b) => a + (b - tMean) * (b - tMean), 0) / totals.length);
+
+  const top = [3, 7, 10, 14, 17, 21, 4, 6]
+    .map((k) => ({ k, pct: freq(k) * 100, mult: table[k] }))
+    .sort((a, b) => b.pct - a.pct);
+
+  return { mult: table, n, years, marginSd: sd, totalMean: tMean, totalSd: tSd,
+           top, counts, at: Date.now() };
+}
 
 const phi = (z) => Math.exp(-0.5 * z * z);
 
@@ -692,6 +769,11 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .fl { font-family:'Oswald',sans-serif; font-weight:600; font-size:16px; display:block;
   margin-top:3px; line-height:1.4; }
 .fl .sep { color:var(--edge); font-weight:400; }
+.bars { display:flex; align-items:flex-end; gap:2px; height:90px; margin-top:10px; }
+.bar { flex:1; background:var(--edge); border-radius:1px 1px 0 0; min-height:2px; }
+.bar.key { background:#E3B448; }
+.axis { display:flex; justify-content:space-between; font-size:9.5px; color:var(--dim);
+  margin-top:4px; font-family:'Oswald',sans-serif; }
 .keybox { background:var(--bg); border-left:3px solid #E3B448; border-radius:0 3px 3px 0;
   padding:13px 14px; margin-top:16px; }
 .kh { display:block; font-family:'Oswald',sans-serif; font-weight:600; font-size:15px;
@@ -935,6 +1017,117 @@ function Top25() {
           </p>
         </>
       )}
+    </>
+  );
+}
+
+function ModelTab({ emp, setEmp }) {
+  const [busy, setBusy] = useState(false);
+  const [prog, setProg] = useState([0, 0]);
+  const [err, setErr] = useState(null);
+
+  const run = async (years) => {
+    setBusy(true); setErr(null); setProg([0, years.length * 16]);
+    try {
+      const d = await calibrate(years, (a, b) => setProg([a, b]));
+      EMP = d; setEmp(d);
+      try { await window.storage.set("linedesk:margins", JSON.stringify(d)); } catch (e) {}
+    } catch (e) {
+      setErr("Calibration failed: " + (e.message || "unknown") + ". ESPN may be rate-limiting.");
+    } finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    EMP = null; setEmp(null);
+    try { await window.storage.delete("linedesk:margins"); } catch (e) {}
+  };
+
+  const maxCount = emp ? Math.max(...Object.keys(emp.counts).filter((k) => +k <= 40)
+    .map((k) => emp.counts[k])) : 1;
+
+  return (
+    <>
+      <div className="stale" style={{ borderLeftColor: emp ? "#35D07F" : "#E3B448" }}>
+        {emp ? (
+          <>
+            <b>Calibrated on {emp.n.toLocaleString()} real games</b> from {emp.years.join(", ")}.
+            The key-number weights below are measured from how those games actually finished,
+            not estimated. Spread pricing across the app uses them.
+          </>
+        ) : (
+          <>
+            <b>Running on built-in estimates.</b> The key-number weights are shaped from how
+            FBS results generally fall, not measured. Calibrate below and the app rebuilds them
+            from real finals — free, from ESPN, and it only has to happen once.
+          </>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "12px 0" }}>
+        <button className="pull" style={{ marginTop: 0, flex: 1, minWidth: 150 }}
+          disabled={busy} onClick={() => run([2024, 2025])}>
+          {busy ? `Reading week ${prog[0]} of ${prog[1]}…` : "Calibrate · 2 seasons"}
+        </button>
+        <button className="pull" style={{ marginTop: 0, flex: 1, minWidth: 150 }}
+          disabled={busy} onClick={() => run([2022, 2023, 2024, 2025])}>
+          {busy ? "…" : "Calibrate · 4 seasons"}
+        </button>
+      </div>
+      {err && <p className="err">{err}</p>}
+
+      {emp && (
+        <>
+          <div className="keybox" style={{ marginTop: 4 }}>
+            <span className="role">Measured from your sample</span>
+            <span className="kh">How often games actually land on each margin</span>
+            <div className="bars">
+              {[...Array(41)].map((_, m) => {
+                const c = emp.counts[m] || 0;
+                const isKey = [3, 7, 10, 14, 17, 21].includes(m);
+                return (
+                  <span key={m} className={"bar" + (isKey ? " key" : "")}
+                    style={{ height: Math.max(2, (c / maxCount) * 100) + "%" }}
+                    title={m + " points: " + c + " games"} />
+                );
+              })}
+            </div>
+            <div className="axis"><span>0</span><span>10</span><span>20</span><span>30</span><span>40</span></div>
+            <p className="kb" style={{ marginTop: 10 }}>
+              {emp.top.slice(0, 4).map((t) => (
+                <span key={t.k} style={{ display: "block" }}>
+                  <b>{t.k} points</b> — {t.pct.toFixed(1)}% of games, {t.mult.toFixed(2)}× its
+                  neighbours
+                </span>
+              ))}
+            </p>
+          </div>
+
+          <div className="keybox" style={{ borderLeftColor: "#35D07F" }}>
+            <span className="role">Also measured</span>
+            <p className="kb" style={{ marginTop: 6 }}>
+              Margin standard deviation <b>{emp.marginSd.toFixed(1)}</b> · average total{" "}
+              <b>{emp.totalMean.toFixed(1)}</b> · total standard deviation{" "}
+              <b>{emp.totalSd.toFixed(1)}</b>.
+            </p>
+            <p className="kb dim">
+              That margin figure is the spread of raw results, which is wider than the {SIG_M}
+              -point number the app prices with — that one is the error around the spread, and
+              measuring it would need historical closing lines ESPN drops after a game ends.
+              The shape is yours; the width is still an assumption.
+            </p>
+          </div>
+
+          <button className="collapse" onClick={clear}>▸ Discard and return to built-in estimates</button>
+        </>
+      )}
+
+      <p className="empty">
+        Calibration reads {emp ? emp.years.length * 16 : 32} weeks of finished games straight
+        from ESPN's scoreboard, counts every margin, and compares each one against its
+        neighbours. A number that shows up far more often than the margins either side of it
+        is a key number, and the ratio is what the model uses. Costs nothing and is stored on
+        this device.
+      </p>
     </>
   );
 }
@@ -1424,6 +1617,7 @@ export default function LineDesk() {
   const [now, setNow] = useState(() => new Date());
   const [live, setLive] = useState(true);
   const [espnGames, setEspnGames] = useState(null);
+  const [emp, setEmp] = useState(null);
   const [today, setToday] = useState([]);
   const [todayAt, setTodayAt] = useState(null);
   const [espnAt, setEspnAt] = useState(null);
@@ -1469,6 +1663,10 @@ export default function LineDesk() {
       try {
         const r = await window.storage.get("linedesk:odds");
         if (r && r.value) setEntries(JSON.parse(r.value));
+        try {
+          const m = await window.storage.get("linedesk:margins");
+          if (m && m.value) { const d = JSON.parse(m.value); EMP = d; setEmp(d); }
+        } catch (e) { /* built-in estimates stand in */ }
       } catch (e) { /* nothing saved */ }
       setLoaded(true);
     })();
@@ -1535,6 +1733,10 @@ export default function LineDesk() {
             </button>
             <button data-on={tab === "top25" ? "1" : "0"}
               onClick={() => { setTab("top25"); setOpen(null); }}>Top 25</button>
+            <button data-on={tab === "model" ? "1" : "0"}
+              onClick={() => { setTab("model"); setOpen(null); }}>
+              Model{emp ? " ✓" : ""}
+            </button>
           </div>
         </header>
 
@@ -1698,6 +1900,7 @@ export default function LineDesk() {
         )}
 
         {tab === "top25" && <Top25 />}
+        {tab === "model" && <ModelTab emp={emp} setEmp={setEmp} />}
 
         <div className="ft">
           <p>Expected value is measured against the other books loaded for that game — Pinnacle
@@ -1707,9 +1910,9 @@ export default function LineDesk() {
           <p>Spreads are priced off a discrete margin distribution — a normal shape ({SIG_M}
             points) reweighted so 3 and 7 carry the extra mass they carry in real games —
             and pushes on whole numbers are counted as returned stakes rather than ignored.
-            The weightings are approximate, shaped from how FBS results generally fall rather
-            than fitted to one season, so treat the half-point figures as well-informed
-            estimates. Totals still use a plain curve ({SIG_T} points); key totals exist but
+            The weightings start as estimates shaped from how FBS results generally fall; run
+            the calibration on the Model tab and they're replaced with weights measured from
+            real finished games. Totals still use a plain curve ({SIG_T} points); key totals exist but
             are far weaker than key spreads.</p>
           <p>School colors come from ESPN, lifted in lightness where the real hex would be
             unreadable on a dark screen. Odds and notes are saved on this device. If betting has stopped being fun,
