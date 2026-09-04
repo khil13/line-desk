@@ -454,11 +454,6 @@ const devigPower = (ps) => {
   const t = raw.reduce((a, b) => a + b, 0);
   return raw.map((r) => r / t);
 };
-const devigMult = (ps) => {
-  const t = ps.reduce((a, b) => a + b, 0);
-  return ps.map((p) => p / t);
-};
-
 const erf = (x) => {
   const s = Math.sign(x); x = Math.abs(x);
   const t = 1 / (1 + 0.3275911 * x);
@@ -678,18 +673,6 @@ function halfPointValue(mu, L, sigma) {
 const round5 = (x) => Math.round(x * 2) / 2;
 const modelLine = (wp) => (wp == null ? null : -SIG_M * invNorm(wp / 100));
 const trim = (x) => Number(x).toFixed(1).replace(/\.0$/, "");
-
-// Lines barely move three days out and move constantly an hour out,
-// so how long a quote stays "fresh" depends on kickoff proximity.
-const freshFor = (kickAt, now) => {
-  if (!kickAt) return 30 * 60000;
-  const hrs = (new Date(kickAt) - now) / 3600000;
-  if (hrs < 0) return 60 * 60000;
-  if (hrs < 1) return 2 * 60000;
-  if (hrs < 6) return 10 * 60000;
-  if (hrs < 24) return 30 * 60000;
-  return 120 * 60000;
-};
 
 const shortAge = (ms) => {
   const m = Math.round(ms / 60000);
@@ -1069,13 +1052,6 @@ const askClaude = async (prompt, useSearch = true, ms = 60000) => {
   } finally { clearTimeout(timer); }
 };
 
-const askJson = async (prompt, useSearch = true) => {
-  const txt = (await askClaude(prompt, useSearch)).replace(/```json|```/g, "").trim();
-  const m = txt.match(/\{[\s\S]*\}/);
-  if (!m) throw new Error("no json");
-  return JSON.parse(m[0]);
-};
-
 // Kickoff drives live state when ESPN's own status field isn't available.
 const phaseOf = (kickAt, now) => {
   if (!kickAt) return "pre";
@@ -1297,6 +1273,7 @@ async function sweepBoard(games, onProgress) {
             const mktMu = spAvg != null ? -spAvg : null;
             const modelMu = d.espnWp != null ? -modelLine(d.espnWp) : null;
             out[g.id] = {
+              sum: d,
               sp: spAvg, tot: totAvg, n: books.length, wp: d.espnWp,
               gap: mktMu != null && modelMu != null ? modelMu - mktMu : null,
               inj: (d.injuries || []).reduce((a, t) => a + t.list.length, 0),
@@ -1309,106 +1286,6 @@ async function sweepBoard(games, onProgress) {
   };
   await Promise.all([0,0,0,0,0,0,0,0].map(worker));
   return out;
-}
-
-const KEYNUM = [3, 7, 10, 14, 17, 21];
-
-/* Scan every game for how far apart the books are. Where they disagree
-   is where shopping is worth something. */
-function ScanBoard({ games, onOpen }) {
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(0);
-  const [rows, setRows] = useState(null);
-  const [err, setErr] = useState(null);
-
-  const run = async () => {
-    setBusy(true); setErr(null); setDone(0); setRows([]);
-    const chunks = [];
-    for (let i = 0; i < games.length; i += 5) chunks.push(games.slice(i, i + 5));
-    const acc = [];
-    // Chunks run concurrently — sequential meant 15 games took three full
-    // web searches back to back.
-    await Promise.all(chunks.map(async (ch) => {
-      const list = ch.map((g, i) => `${i + 1}. ${g.away} at ${g.home} (${g.kick})`).join("\n");
-      try {
-        const d = await askJson(
-          `For each 2026 college football game below, search for the current point spread ` +
-          `and total at major US sportsbooks. I need the RANGE across books, not one number.\n\n` +
-          `${list}\n\nReply with ONLY JSON, no fences:\n` +
-          `{"g":[{"i":1,"sLow":most negative home spread any book posts,` +
-          `"sHigh":least negative home spread any book posts,"tLow":lowest total,` +
-          `"tHigh":highest total,"n":how many books you found}]}\n\n` +
-          `Home spread is negative when the home team is favored. If a game has no posted ` +
-          `market, omit it entirely. Never invent a number — omit instead.`
-        );
-        for (const r of d.g || []) {
-          const g = ch[r.i - 1];
-          if (!g || r.sLow == null || r.sHigh == null) continue;
-          const lo = Math.min(Number(r.sLow), Number(r.sHigh));
-          const hi = Math.max(Number(r.sLow), Number(r.sHigh));
-          const spread = hi - lo;
-          const straddles = KEYNUM.filter((k) => Math.abs(lo) < k && k < Math.abs(hi));
-          const tSpread = r.tLow != null && r.tHigh != null
-            ? Math.abs(Number(r.tHigh) - Number(r.tLow)) : null;
-          acc.push({ g, lo, hi, spread, tLow: r.tLow, tHigh: r.tHigh, tSpread,
-                     n: r.n, straddles });
-        }
-      } catch (e) { /* keep going through the rest of the board */ }
-      setDone((x) => x + ch.length);
-      setRows([...acc].sort((a, b) => (b.spread + (b.tSpread || 0)) - (a.spread + (a.tSpread || 0))));
-    }));
-    setBusy(false);
-    if (!acc.length) setErr("No posted markets found across the board. Normal this far out from a slate of small-school games.");
-  };
-
-  return (
-    <div className="scan">
-      <button className="pull" onClick={run} disabled={busy} style={{ marginTop: 0 }}>
-        {busy ? `Scanning… ${done} of ${games.length}` : "Scan the board for disagreement"}
-      </button>
-      {err && <p className="err">{err}</p>}
-      {rows && rows.length > 0 && (
-        <>
-          <p className="empty" style={{ paddingBottom: 6 }}>
-            Sorted by how far apart the books are. The wider the gap, the more your choice of
-            book decides the bet.
-          </p>
-          {rows.map((r, i) => (
-            <button className="gm scanrow" key={i} style={{ borderLeftColor: col(r.g.hAb) }}
-              onClick={() => onOpen(r.g.id)}>
-              <span className="who">
-                <span className="abbr">
-                  <span style={{ color: col(r.g.aAb) }}>{r.g.aAb}</span>
-                  <i>at</i>
-                  <span style={{ color: col(r.g.hAb) }}>{r.g.hAb}</span>
-                </span>
-                <span className="meta">
-                  {trim(r.lo)} to {trim(r.hi)}
-                  {r.tSpread != null && ` · total ${trim(r.tLow)}–${trim(r.tHigh)}`}
-                  {r.n ? ` · ${r.n} books` : ""}
-                </span>
-                {r.straddles.length > 0 && (
-                  <span className="key">crosses {r.straddles.join(" and ")}</span>
-                )}
-              </span>
-              <span className="rt">
-                <span className="line" style={{ color: r.spread >= 1 ? "#35D07F" : r.spread > 0 ? "#E3B448" : "#7E8899" }}>
-                  {r.spread > 0 ? trim(r.spread) : "0"}
-                </span>
-                <span className="sub">PT GAP</span>
-              </span>
-            </button>
-          ))}
-          <p className="empty">
-            A gap under half a point is noise. A full point or more means one book is
-            meaningfully out of line — and if the gap crosses 3, 7 or 10, that half point is
-            worth far more than the price difference suggests, because those are the margins
-            games actually land on.
-          </p>
-        </>
-      )}
-    </div>
-  );
 }
 
 function ReadGame({ game, ctx, saved, save }) {
@@ -1827,6 +1704,7 @@ function LineDesk() {
   const [emp, setEmp] = useState(null);
   const [boardOdds, setBoardOdds] = useState({});
   const [sweeping, setSweeping] = useState(false);
+  const [sweptDay, setSweptDay] = useState(null);
   const [sweepProg, setSweepProg] = useState([0, 0]);
   const [sort, setSort] = useState("time");
   const [onlyMkt, setOnlyMkt] = useState(false);
@@ -1879,6 +1757,16 @@ function LineDesk() {
           const m = await window.storage.get("linedesk:margins");
           if (m && m.value) { const d = JSON.parse(m.value); EMP = d; setEmp(d); }
         } catch (e) { /* built-in estimates stand in */ }
+        try {
+          const bd = await window.storage.get("linedesk:board");
+          if (bd && bd.value) {
+            const o = JSON.parse(bd.value);
+            // Only restore it for the day it was taken on.
+            if (o && o.odds && Date.now() - o.at < 6 * 3600000) {
+              setBoardOdds(o.odds); setSweptDay(o.day);
+            }
+          }
+        } catch (e) { /* no saved sweep */ }
       } catch (e) { /* nothing saved */ }
       setLoaded(true);
     })();
@@ -1988,7 +1876,22 @@ function LineDesk() {
                 onClick={async () => {
                   setSweeping(true); setSweepProg([0, board.length]);
                   const r = await sweepBoard(board, (a, b) => setSweepProg([a, b]));
-                  setBoardOdds(r); setSweeping(false);
+                  setBoardOdds(r); setSweptDay(day);
+                  // Seed each game panel so opening one is instant instead of
+                  // re-fetching the summary the sweep already has.
+                  setEntries((prev) => {
+                    const next = { ...prev };
+                    for (const id of Object.keys(r)) {
+                      if (!r[id].sum) continue;
+                      next[id] = { ...(next[id] || {}), sum: r[id].sum };
+                    }
+                    return next;
+                  });
+                  try {
+                    await window.storage.set("linedesk:board",
+                      JSON.stringify({ day, at: Date.now(), odds: r }));
+                  } catch (e) { /* stays in memory */ }
+                  setSweeping(false);
                 }}>
                 {sweeping ? `Reading game ${sweepProg[0]} of ${sweepProg[1]}…`
                   : Object.keys(boardOdds).length
@@ -2013,7 +1916,6 @@ function LineDesk() {
               )}
             </div>
 
-            <ScanBoard games={board} onOpen={(id) => setOpen(id)} />
 
 
             <div className="stale" style={{ borderLeftColor: onEspn ? "#35D07F" : "#E3B448" }}>
@@ -2029,14 +1931,15 @@ function LineDesk() {
               ) : (
                 <>
                   <b>Running on the built-in snapshot</b>, frozen {ageText(SNAPSHOT, now)} ago.
-                  The free ESPN feed is blocked in here, so schedule and scores can't move and
+                  {espnErr && espnErr !== "blocked" ? espnErr + " " : ""}
+                  The free ESPN feed isn't answering, so schedule and scores can't move and
                   anything live costs Claude usage. The standalone build has no such limit.
                 </>
               )}
             </div>
 
             {shown.map((g) => {
-              const bo = boardOdds[g.id];
+              const bo = sweptDay && sweptDay !== day ? null : boardOdds[g.id];
               const L = modelLine(g.wp);
               const fav = L == null ? null : L <= 0 ? g.hAb : g.aAb;
               return (
