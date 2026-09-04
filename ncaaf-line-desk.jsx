@@ -775,6 +775,21 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .fl { font-family:'Oswald',sans-serif; font-weight:600; font-size:16px; display:block;
   margin-top:3px; line-height:1.4; }
 .fl .sep { color:var(--edge); font-weight:400; }
+.sweepbar { margin-bottom:12px; }
+.playcard { display:flex; gap:12px; background:var(--card); border-left:4px solid var(--turf);
+  border-radius:0 3px 3px 0; padding:14px; margin-bottom:8px; cursor:pointer; }
+.pnum { font-family:'Oswald',sans-serif; font-weight:700; font-size:24px; color:var(--turf);
+  line-height:1; flex-shrink:0; }
+.pbody { min-width:0; flex:1; }
+.pside { display:block; font-family:'Oswald',sans-serif; font-weight:600; font-size:19px; }
+.pprice { color:var(--fg); }
+.pbook { display:block; font-size:11.5px; color:var(--dim); margin:3px 0 9px;
+  text-transform:uppercase; letter-spacing:.05em; }
+.why { margin:0; padding:0; list-style:none; }
+.why li { font-size:12.5px; line-height:1.5; color:#C9D1DE; padding:3px 0 3px 12px; position:relative; }
+.why li::before { content:''; position:absolute; left:0; top:10px; width:4px; height:4px;
+  border-radius:50%; background:var(--turf); }
+.why b { color:var(--turf); }
 .bars { display:flex; align-items:flex-end; gap:2px; height:90px; margin-top:10px; }
 .bar { flex:1; background:var(--edge); border-radius:1px 1px 0 0; min-height:2px; }
 .bar.key { background:#E3B448; }
@@ -1015,6 +1030,134 @@ function Top25() {
             priced the same as anyone else once the number is posted. Cached six hours.
           </p>
         </>
+      )}
+    </>
+  );
+}
+
+/* Judge one game against a deliberately strict bar. Returns a rejection
+   far more often than a pick, which is the correct answer most weeks. */
+function assess(game, sum) {
+  if (!sum || !sum.pick) return null;
+  const rows = {};
+  for (const b of sum.pick) {
+    if (b.sp != null)
+      rows[b.k] = { l: String(b.sp), a: String(b.spA ?? -110), b: String(b.spB ?? -110) };
+  }
+  const res = shop("sp", game, rows, devigPower);
+  if (!res) return null;
+
+  const modelMu = sum.espnWp != null ? -modelLine(sum.espnWp) : null;
+  if (modelMu == null) return null;
+
+  const fail = [];
+  // One book isn't a market, and two that copy each other aren't either.
+  if (res.count < 3) fail.push(`only ${res.count} book${res.count === 1 ? "" : "s"} priced it`);
+
+  const gap = modelMu - res.cons;
+  const sideHome = gap > 0;
+  const best = sideHome ? res.bestB : res.bestA;
+  if (best.L == null) return null;
+  const L = sideHome ? best.L : -best.L;
+
+  // Expected value if the projection is right — not against the market,
+  // which with retail books only ever measures vig.
+  const raw = coverProb(modelMu, best.L, SIG_M);
+  const c = sideHome ? raw : { win: raw.lose, push: raw.push, lose: raw.win };
+  const pModel = c.win + c.push / 2;
+  const price = sideHome ? best.ob : best.oa;
+  const w = payout(price);
+  if (w == null) return null;
+  const ev = pModel * w - (1 - pModel);
+
+  const hp = halfPointValue(res.cons, best.L, SIG_M);
+  const onKey = [3, 7, 10, 14, 17].some((k) => Math.abs(Math.abs(best.L) - k) < 0.01);
+
+  const need = 2.5 + (onKey ? 1.5 : 0);
+  if (Math.abs(gap) < need)
+    fail.push(`gap of ${Math.abs(gap).toFixed(1)} is under the ${need.toFixed(1)} required${onKey ? " on a key number" : ""}`);
+  if (ev < 0.02)
+    fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
+
+  return { game, res, gap, sideHome, best, L, ev, pModel, hp, onKey, fail,
+           side: sideHome ? game.home : game.away,
+           score: ev * Math.min(1, res.count / 4) * (onKey ? 0.7 : 1) };
+}
+
+function CardTab({ board, boardOdds, entries, onOpen }) {
+  const cands = board
+    .map((g) => assess(g, (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum))
+    .filter(Boolean);
+  const passed = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
+  const near = cands.filter((c) => c.fail.length === 1)
+    .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap)).slice(0, 4);
+  const swept = Object.keys(boardOdds).length > 0;
+
+  return (
+    <>
+      {!swept && (
+        <div className="stale">
+          Nothing to judge yet. Load the lines for the board on the <b>This week</b> tab first —
+          the card is built from those numbers, not a separate source.
+        </div>
+      )}
+
+      {swept && passed.length === 0 && (
+        <div className="stale" style={{ borderLeftColor: "#35D07F" }}>
+          <b>No plays on this card.</b> {cands.length} games had enough of a market to judge and
+          none cleared the bar. That's the normal result, not a failure — most Saturdays the
+          honest answer is that the number is the number.
+        </div>
+      )}
+
+      {passed.map((c, i) => (
+        <div className="playcard" key={c.game.id} onClick={() => onOpen(c.game.id)}>
+          <span className="pnum">{i + 1}</span>
+          <div className="pbody">
+            <span className="pside" style={{ color: tc(c.game, c.sideHome ? "h" : "a") }}>
+              {c.side} {c.L > 0 ? "+" : "−"}{trim(Math.abs(c.L))}{" "}
+              <span className="pprice">{fmtOdds(parseFloat(c.sideHome ? c.best.ob : c.best.oa))}</span>
+            </span>
+            <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
+            <ul className="why">
+              <li>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market across {c.res.count} books.</li>
+              <li>Covers {(c.pModel * 100).toFixed(0)}% of the time if that projection is right,
+                  which at this price is <b>+{(c.ev * 100).toFixed(1)}%</b>.</li>
+              <li>Half a point here is worth {(c.hp * 100).toFixed(1)}%
+                  {c.onKey ? " — and it's on a key number, so this had to clear a higher bar" : ""}.</li>
+            </ul>
+          </div>
+        </div>
+      ))}
+
+      {swept && near.length > 0 && (
+        <>
+          <p className="empty" style={{ paddingTop: 18 }}>
+            <b style={{ color: "#F2F5FA" }}>Missed by one thing.</b> Shown so you can see what the
+            bar rejects, not as picks.
+          </p>
+          {near.map((c) => (
+            <div className="gm" key={c.game.id} style={{ borderLeftColor: tc(c.game, "h") }}
+              onClick={() => onOpen(c.game.id)}>
+              <span className="who">
+                <span className="abbr">
+                  <span style={{ color: tc(c.game, "a") }}>{c.game.aAb}</span><i>at</i>
+                  <span style={{ color: tc(c.game, "h") }}>{c.game.hAb}</span>
+                </span>
+                <span className="meta">{c.side} — {c.fail[0]}</span>
+              </span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {swept && (
+        <p className="empty">
+          Every number here assumes ESPN's projection is right, and that's one model with no
+          second opinion behind it. Clearing this bar means the model and the market disagree
+          by more than the market disagrees with itself — not that the game is won. Nothing on
+          this card is priced against a sharp book, because ESPN's feed carries retail ones.
+        </p>
       )}
     </>
   );
@@ -1738,6 +1881,8 @@ export default function LineDesk() {
             </button>
             <button data-on={tab === "top25" ? "1" : "0"}
               onClick={() => { setTab("top25"); setOpen(null); }}>Top 25</button>
+            <button data-on={tab === "card" ? "1" : "0"}
+              onClick={() => { setTab("card"); setOpen(null); }}>Card</button>
             <button data-on={tab === "model" ? "1" : "0"}
               onClick={() => { setTab("model"); setOpen(null); }}>
               Model{emp ? " ✓" : ""}
@@ -1975,6 +2120,10 @@ export default function LineDesk() {
         )}
 
         {tab === "top25" && <Top25 />}
+        {tab === "card" && (
+          <CardTab board={board} boardOdds={boardOdds} entries={entries}
+            onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
+        )}
         {tab === "model" && <ModelTab emp={emp} setEmp={setEmp} />}
 
         <div className="ft">
