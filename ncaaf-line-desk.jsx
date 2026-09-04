@@ -413,33 +413,54 @@ const mult = (m) => {
 /* Walk ESPN's scoreboard week by week and count how real games actually
    finished. Free, and it turns the model from my estimate into your data. */
 async function calibrate(years, onProgress) {
-  const tasks = [];
-  for (const y of years) for (let w = 1; w <= 16; w++) tasks.push([y, w]);
   const margins = [], totals = [];
+  const seen = new Set();          // ESPN can return a game under two queries
   let done = 0, idx = 0;
+
+  const harvest = (j) => {
+    let n = 0;
+    for (const ev of j.events || []) {
+      const st = (ev.status && ev.status.type) || {};
+      if (!st.completed || seen.has(ev.id)) continue;
+      const cs = ((ev.competitions || [])[0] || {}).competitors || [];
+      const H = cs.find((x) => x.homeAway === "home");
+      const A = cs.find((x) => x.homeAway === "away");
+      if (!H || !A) continue;
+      const hs = Number(H.score), as = Number(A.score);
+      if (!isFinite(hs) || !isFinite(as)) continue;
+      seen.add(ev.id);
+      margins.push(hs - as); totals.push(hs + as); n++;
+    }
+    return n;
+  };
+
+  // Every Saturday of the season, plus weeknights. Date queries are the
+  // reliable ones; the week parameter returns partial slates.
+  const tasks = [];
+  for (const y of years) {
+    const d = new Date(Date.UTC(y, 7, 20));
+    while (d.getUTCDay() !== 6) d.setUTCDate(d.getUTCDate() + 1);
+    for (let i = 0; i < 16; i++) {
+      const sat = new Date(d); sat.setUTCDate(d.getUTCDate() + i * 7);
+      for (const off of [0, -2, -1]) {          // Sat, plus Thu and Fri
+        const x = new Date(sat); x.setUTCDate(sat.getUTCDate() + off);
+        tasks.push(x.getUTCFullYear() +
+          String(x.getUTCMonth() + 1).padStart(2, "0") +
+          String(x.getUTCDate()).padStart(2, "0"));
+      }
+    }
+  }
 
   const worker = async () => {
     while (idx < tasks.length) {
-      const [y, w] = tasks[idx++];
+      const d = tasks[idx++];
       try {
-        const j = await espnGet(
-          `/scoreboard?dates=${y}&seasontype=2&week=${w}&limit=400`, 20000);
-        for (const ev of j.events || []) {
-          const st = (ev.status && ev.status.type) || {};
-          if (!st.completed) continue;
-          const cs = ((ev.competitions || [])[0] || {}).competitors || [];
-          const H = cs.find((x) => x.homeAway === "home");
-          const A = cs.find((x) => x.homeAway === "away");
-          if (!H || !A) continue;
-          const hs = Number(H.score), as = Number(A.score);
-          if (!isFinite(hs) || !isFinite(as)) continue;
-          margins.push(hs - as); totals.push(hs + as);
-        }
-      } catch (e) { /* a missing week shouldn't sink the run */ }
+        harvest(await espnGet(`/scoreboard?dates=${d}&groups=80&limit=400`, 20000));
+      } catch (e) { /* one dead day shouldn't sink the run */ }
       onProgress(++done, tasks.length);
     }
   };
-  await Promise.all([worker(), worker(), worker(), worker()]);
+  await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
 
   const n = margins.length;
   if (n < 400) throw new Error("only " + n + " games");
@@ -449,20 +470,22 @@ async function calibrate(years, onProgress) {
   for (const m of abs) counts[m] = (counts[m] || 0) + 1;
   const freq = (m) => (counts[m] || 0) / n;
 
-  // Leave-one-out smoothing: compare each margin against its neighbours,
-  // so the result measures the spike itself rather than the overall shape.
+  // Leave-one-out smoothing: compare each margin against its neighbours, so
+  // the result measures the spike itself rather than the overall shape.
+  // Margin 0 is skipped — football has no ties, so an empty bucket there
+  // would drag the baseline down and inflate 1, 2 and especially 3.
   const baseline = (m) => {
     let num = 0, den = 0;
     for (const k of [m - 3, m - 2, m - 1, m + 1, m + 2, m + 3]) {
-      if (k < 0) continue;
+      if (k < 1) continue;
       const w = Math.exp(-0.5 * Math.pow((k - m) / 2.5, 2));
       num += w * freq(k); den += w;
     }
     return den ? num / den : 0;
   };
 
-  const table = {};
-  for (let m = 0; m <= 45; m++) {
+  const table = { 0: 0 };            // no ties in college football
+  for (let m = 1; m <= 45; m++) {
     const b = baseline(m);
     table[m] = b > 0 ? Math.max(0.30, Math.min(3.5, freq(m) / b)) : 1;
   }
@@ -477,7 +500,7 @@ async function calibrate(years, onProgress) {
     .sort((a, b) => b.pct - a.pct);
 
   return { mult: table, n, years, marginSd: sd, totalMean: tMean, totalSd: tSd,
-           top, counts, at: Date.now() };
+           top, counts, perSeason: Math.round(n / years.length), at: Date.now() };
 }
 
 const phi = (z) => Math.exp(-0.5 * z * z);
@@ -1050,9 +1073,15 @@ function ModelTab({ emp, setEmp }) {
       <div className="stale" style={{ borderLeftColor: emp ? "#35D07F" : "#E3B448" }}>
         {emp ? (
           <>
-            <b>Calibrated on {emp.n.toLocaleString()} real games</b> from {emp.years.join(", ")}.
-            The key-number weights below are measured from how those games actually finished,
-            not estimated. Spread pricing across the app uses them.
+            <b>Calibrated on {emp.n.toLocaleString()} real games</b> from {emp.years.join(", ")}
+            {emp.perSeason ? ` — about ${emp.perSeason} per season` : ""}. The key-number
+            weights below are measured from how those games actually finished, not estimated.
+            Spread pricing across the app uses them.
+            {emp.perSeason && emp.perSeason < 450 && (
+              <> <b style={{ color: "#E3B448" }}>Thin sample.</b> A full FBS season is roughly
+              800 games, so ESPN returned only part of it. The shape is directionally right but
+              individual multipliers will be noisy — re-run it, or run four seasons.</>
+            )}
           </>
         ) : (
           <>
@@ -1066,7 +1095,7 @@ function ModelTab({ emp, setEmp }) {
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "12px 0" }}>
         <button className="pull" style={{ marginTop: 0, flex: 1, minWidth: 150 }}
           disabled={busy} onClick={() => run([2024, 2025])}>
-          {busy ? `Reading week ${prog[0]} of ${prog[1]}…` : "Calibrate · 2 seasons"}
+  {busy ? `Reading ${prog[0]} of ${prog[1]} days…` : "Calibrate · 2 seasons"}
         </button>
         <button className="pull" style={{ marginTop: 0, flex: 1, minWidth: 150 }}
           disabled={busy} onClick={() => run([2022, 2023, 2024, 2025])}>
@@ -1122,11 +1151,12 @@ function ModelTab({ emp, setEmp }) {
       )}
 
       <p className="empty">
-        Calibration reads {emp ? emp.years.length * 16 : 32} weeks of finished games straight
-        from ESPN's scoreboard, counts every margin, and compares each one against its
-        neighbours. A number that shows up far more often than the margins either side of it
-        is a key number, and the ratio is what the model uses. Costs nothing and is stored on
-        this device.
+        Calibration sweeps every Thursday, Friday and Saturday of each season straight from
+        ESPN's scoreboard, de-duplicates, counts every final margin, and compares each one
+        against its neighbours. A margin appearing far more often than those either side of it
+        is a key number, and that ratio is what the model prices with. Margin zero is excluded
+        from the comparison — football has no ties, and an empty bucket there would inflate the
+        multipliers at 1, 2 and 3. Free, and stored on this device.
       </p>
     </>
   );
