@@ -1162,6 +1162,42 @@ function ModelTab({ emp, setEmp }) {
   );
 }
 
+/* Pull the summary for every game on the board so the list itself carries
+   real numbers. Free — it's the same endpoint one game at a time. */
+async function sweepBoard(games, onProgress) {
+  const out = {};
+  let done = 0, idx = 0;
+  const worker = async () => {
+    while (idx < games.length) {
+      const g = games[idx++];
+      if (g.espnId) {
+        try {
+          const d = parseSummary(await espnGet("/summary?event=" + g.espnId, 15000),
+                                 g.hAb, g.aAb);
+          const books = (d.pick || []).filter((b) => b.sp != null);
+          const tots = (d.pick || []).filter((b) => b.tot != null);
+          if (books.length || tots.length || d.espnWp != null) {
+            const spAvg = books.length
+              ? books.reduce((a, b) => a + b.sp, 0) / books.length : null;
+            const totAvg = tots.length
+              ? tots.reduce((a, b) => a + b.tot, 0) / tots.length : null;
+            const mktMu = spAvg != null ? -spAvg : null;
+            const modelMu = d.espnWp != null ? -modelLine(d.espnWp) : null;
+            out[g.id] = {
+              sp: spAvg, tot: totAvg, n: books.length, wp: d.espnWp,
+              gap: mktMu != null && modelMu != null ? modelMu - mktMu : null,
+              inj: (d.injuries || []).reduce((a, t) => a + t.list.length, 0),
+            };
+          }
+        } catch (e) { /* skip and keep going */ }
+      }
+      onProgress(++done, games.length);
+    }
+  };
+  await Promise.all([0,0,0,0,0,0,0,0].map(worker));
+  return out;
+}
+
 const KEYNUM = [3, 7, 10, 14, 17, 21];
 
 /* Scan every game for how far apart the books are. Where they disagree
@@ -1676,6 +1712,11 @@ export default function LineDesk() {
   const [live, setLive] = useState(true);
   const [espnGames, setEspnGames] = useState(null);
   const [emp, setEmp] = useState(null);
+  const [boardOdds, setBoardOdds] = useState({});
+  const [sweeping, setSweeping] = useState(false);
+  const [sweepProg, setSweepProg] = useState([0, 0]);
+  const [sort, setSort] = useState("time");
+  const [onlyMkt, setOnlyMkt] = useState(false);
   const [today, setToday] = useState([]);
   const [todayAt, setTodayAt] = useState(null);
   const [espnAt, setEspnAt] = useState(null);
@@ -1747,6 +1788,24 @@ export default function LineDesk() {
   const pool = today.length ? today : board;
   const inPlay = pool.filter((g) =>
     g.state ? g.state === "in" : phaseOf(g.kickAt, now) === "live");
+  const shown = (() => {
+    let list = board.slice();
+    if (onlyMkt) list = list.filter((g) => boardOdds[g.id] && boardOdds[g.id].n > 0);
+    if (sort === "gap") {
+      list.sort((a, b) => {
+        const ga = boardOdds[a.id] && boardOdds[a.id].gap;
+        const gb = boardOdds[b.id] && boardOdds[b.id].gap;
+        return (gb == null ? -1 : Math.abs(gb)) - (ga == null ? -1 : Math.abs(ga));
+      });
+    } else if (sort === "rank") {
+      const best = (g) => Math.min(g.hR || 99, g.aR || 99);
+      list.sort((a, b) => best(a) - best(b));
+    } else {
+      list.sort((a, b) => new Date(a.kickAt || 0) - new Date(b.kickAt || 0));
+    }
+    return list;
+  })();
+
   const nextUp = [...pool, ...board]
     .filter((g) => g.kickAt && new Date(g.kickAt) > now)
     .sort((a, b) => new Date(a.kickAt) - new Date(b.kickAt))[0];
@@ -1811,6 +1870,36 @@ export default function LineDesk() {
                 { v: "20260903", l: "Thu" }, { v: "20260904", l: "Fri" },
                 { v: "20260905", l: "Sat" }, { v: "20260906", l: "Sun" }]} />
             </div>
+            <div className="sweepbar">
+              <button className="pull" style={{ marginTop: 0 }} disabled={sweeping}
+                onClick={async () => {
+                  setSweeping(true); setSweepProg([0, board.length]);
+                  const r = await sweepBoard(board, (a, b) => setSweepProg([a, b]));
+                  setBoardOdds(r); setSweeping(false);
+                }}>
+                {sweeping ? `Reading game ${sweepProg[0]} of ${sweepProg[1]}…`
+                  : Object.keys(boardOdds).length
+                    ? `${Object.keys(boardOdds).length} games priced · refresh`
+                    : "Load lines for the whole board"}
+              </button>
+              {Object.keys(boardOdds).length > 0 && (
+                <>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                    <Seg value={sort} onChange={setSort} options={[
+                      { v: "time", l: "Kickoff" },
+                      { v: "gap", l: "Model gap" },
+                      { v: "rank", l: "Ranked" }]} />
+                    <Seg value={onlyMkt ? "y" : "n"} onChange={(v) => setOnlyMkt(v === "y")}
+                      options={[{ v: "n", l: "All" }, { v: "y", l: "Priced only" }]} />
+                  </div>
+                  <p className="empty" style={{ paddingBottom: 0 }}>
+                    {shown.length} of {board.length} shown.
+                    {sort === "gap" && " Sorted by how far ESPN's projection sits from the market — the top of this list is where the disagreement is, not where the edge is."}
+                  </p>
+                </>
+              )}
+            </div>
+
             <ScanBoard games={board} onOpen={(id) => setOpen(id)} />
 
 
@@ -1833,7 +1922,8 @@ export default function LineDesk() {
               )}
             </div>
 
-            {board.map((g) => {
+            {shown.map((g) => {
+              const bo = boardOdds[g.id];
               const L = modelLine(g.wp);
               const fav = L == null ? null : L <= 0 ? g.hAb : g.aAb;
               return (
@@ -1855,7 +1945,31 @@ export default function LineDesk() {
                       </span>
                     </span>
                     <span className="rt">
-                      {L != null ? (
+                      {g.hs != null && g.as != null ? (
+                        <>
+                          <span className="line">
+                            <span style={{ color: tc(g, "a") }}>{g.as}</span>
+                            <span style={{ color: "#3B4453", margin: "0 5px" }}>·</span>
+                            <span style={{ color: tc(g, "h") }}>{g.hs}</span>
+                          </span>
+                          <span className="sub">
+                            {g.state === "in" ? <span className="dot" /> : null}{" "}
+                            {g.detail || (g.state === "post" ? "FINAL" : "LIVE")}
+                          </span>
+                        </>
+                      ) : bo && bo.sp != null ? (
+                        <>
+                          <span className="line" style={{ color: tc(g, bo.sp <= 0 ? "h" : "a") }}>
+                            {bo.sp <= 0 ? g.hAb : g.aAb} −{trim(Math.abs(bo.sp))}
+                          </span>
+                          <span className="sub">
+                            {bo.tot != null ? "O/U " + trim(bo.tot) : ""}
+                            {bo.n > 1 ? " · " + bo.n + "BK" : ""}
+                            {bo.gap != null && Math.abs(bo.gap) >= 3
+                              ? " · GAP " + trim(Math.abs(bo.gap)) : ""}
+                          </span>
+                        </>
+                      ) : L != null ? (
                         <>
                           <span className="line" style={{ color: col(fav) }}>
                             {fav} −{trim(Math.abs(L))}
