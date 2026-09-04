@@ -415,7 +415,7 @@ const MARKETS = [
   { k: "tot", label: "Total", line: true },
 ];
 
-function shop(market, game, rows, devig, benchmark) {
+function shop(market, game, rows, devig) {
   const sideA = market === "tot" ? "Over" : game.away;
   const sideB = market === "tot" ? "Under" : game.home;
 
@@ -442,8 +442,10 @@ function shop(market, game, rows, devig, benchmark) {
   const openA = anchorOf(rows.open || {});
   const openAnchor = openA ? openA.v : null;
 
+  // Pinnacle is the sharper benchmark, but ESPN's feed carries US retail
+  // books and rarely includes it. Use it when it's there, don't ask.
   const pin = live.find((q) => q.bk.k === "pin");
-  const usePin = benchmark === "pin" && !!pin;
+  const usePin = !!pin;
   const cons = usePin ? pin.anchor : live.reduce((a, q) => a + q.anchor, 0) / live.length;
 
   const fairAt = (q) => {
@@ -987,7 +989,7 @@ function ReadGame({ game, ctx, saved, save }) {
   );
 }
 
-function Insight({ game, entry, patch, devigKey, benchmark }) {
+function Insight({ game, entry, patch }) {
   const [mk, setMk] = useState("sp");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -997,9 +999,10 @@ function Insight({ game, entry, patch, devigKey, benchmark }) {
   const sum = entry.sum || null;
   const def = MARKETS.find((m) => m.k === mk);
   const rows = entry[mk] || {};
-  const devig = devigKey === "power" ? devigPower : devigMult;
-  const res = useMemo(() => shop(mk, game, rows, devig, benchmark),
-    [mk, rows, devigKey, benchmark, game]);
+  // Power de-vig always: proportional badly overstates heavy favorites,
+  // and college football is full of them.
+  const res = useMemo(() => shop(mk, game, rows, devigPower),
+    [mk, rows, game]);
 
   // Everything below loads itself, free, the moment the game opens.
   const load = async () => {
@@ -1285,17 +1288,16 @@ function Insight({ game, entry, patch, devigKey, benchmark }) {
 export default function LineDesk() {
   const [tab, setTab] = useState("upcoming");
   const [open, setOpen] = useState(null);
-  const [devigKey, setDevigKey] = useState("power");
-  const [benchmark, setBenchmark] = useState("cons");
   const [entries, setEntries] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const [live, setLive] = useState(true);
   const [espnGames, setEspnGames] = useState(null);
+  const [today, setToday] = useState([]);
+  const [todayAt, setTodayAt] = useState(null);
   const [espnAt, setEspnAt] = useState(null);
   const [espnErr, setEspnErr] = useState(null);
   const [day, setDay] = useState("20260903");
-  const [relaying, setRelaying] = useState(false);
   const loading = React.useRef(false);
 
   const loadBoard = async (d) => {
@@ -1314,39 +1316,8 @@ export default function LineDesk() {
     } finally { loading.current = false; }
   };
 
-  // When the sandbox blocks the direct call, relay the same ESPN URL through
-  // the API — one request for the entire board rather than per game.
-  const relayBoard = async (d) => {
-    setRelaying(true);
-    try {
-      const j = await askJson(
-        `Fetch this exact URL and report what it contains:\n` +
-        `https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard?dates=${d}\n\n` +
-        `Reply with ONLY JSON, no fences. Up to 20 games, compact arrays:\n` +
-        `{"g":[["AWAY","HOME","Away Name","Home Name","ISO kickoff","state pre|in|post",` +
-        `away score or null,home score or null,"status detail","spread text or null",` +
-        `total or null,away rank or null,home rank or null,"away record","home record"]]}\n\n` +
-        `Report only what the URL actually returns. If you cannot reach it, return {"g":[]}.`
-      );
-      const g = (j.g || []).map((r, i) => ({
-        id: "relay-" + d + "-" + i, kickAt: r[4], kick: fmtKick(r[4]),
-        aAb: r[0], hAb: r[1], away: r[2], home: r[3],
-        state: r[5] || "pre", as: r[6], hs: r[7], detail: r[8] || "",
-        aR: r[11], hR: r[12], aRec: r[13], hRec: r[14],
-        aColor: null, hColor: null, wp: null,
-        espnOdds: r[9] || r[10] != null
-          ? { details: r[9], ou: r[10], spread: null, mlH: null, mlA: null, book: "ESPN" }
-          : null,
-      })).filter((x) => x.aAb && x.hAb);
-      if (g.length) {
-        setEspnGames(g); setEspnAt(Date.now()); setEspnErr(null);
-        cache.set("board:" + d, g);
-      }
-    } catch (e) { /* keep the snapshot */ }
-    finally { setRelaying(false); }
-  };
-
   useEffect(() => { setEspnGames(null); loadBoard(day); }, [day]);
+
 
   // One scoreboard call carries scores, status, records and ranks, so
   // polling it covers the whole live feed for free.
@@ -1385,11 +1356,29 @@ export default function LineDesk() {
 
   const board = espnGames && espnGames.length ? espnGames : UPCOMING;
   const onEspn = !!(espnGames && espnGames.length);
-  const inPlay = board.filter((g) =>
-    onEspn ? g.state === "in" : phaseOf(g.kickAt, now) === "live");
-  const nextUp = board
-    .filter((g) => g.kickAt && phaseOf(g.kickAt, now) === "pre")
+  // Live games come from the current-day feed, not the day you're browsing.
+  const pool = today.length ? today : board;
+  const inPlay = pool.filter((g) =>
+    g.state ? g.state === "in" : phaseOf(g.kickAt, now) === "live");
+  const nextUp = [...pool, ...board]
+    .filter((g) => g.kickAt && new Date(g.kickAt) > now)
     .sort((a, b) => new Date(a.kickAt) - new Date(b.kickAt))[0];
+
+  // Live is never scoped to the date picker — a game running on Thursday
+  // must show even while you're browsing Saturday.
+  const loadNow = async () => {
+    try {
+      const g = parseBoard(await espnGet("/scoreboard?limit=300"));
+      setToday(g); setTodayAt(Date.now());
+    } catch (e) { /* the selected-day board still covers its own games */ }
+  };
+
+  useEffect(() => {
+    if (!live) return;
+    loadNow();
+    const t = setInterval(loadNow, inPlay.length ? 30000 : 120000);
+    return () => clearInterval(t);
+  }, [live, inPlay.length]);
 
 
 
@@ -1422,10 +1411,6 @@ export default function LineDesk() {
           <>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
               gap: 10, flexWrap: "wrap", padding: "16px 0 10px" }}>
-              <Seg value={benchmark} onChange={setBenchmark}
-                options={[{ v: "cons", l: "Consensus" }, { v: "pin", l: "Pinnacle" }]} />
-              <Seg value={devigKey} onChange={setDevigKey}
-                options={[{ v: "power", l: "Power" }, { v: "mult", l: "Prop" }]} />
               <Seg value={live ? "on" : "off"} onChange={(v) => setLive(v === "on")}
                 options={[{ v: "on", l: "Live" }, { v: "off", l: "Paused" }]} />
             </div>
@@ -1444,9 +1429,9 @@ export default function LineDesk() {
                   <b>{board.length} games from ESPN's public feed</b> — schedule, scores, records,
                   rankings, real school colors and a book line, all keyless and free. Costs you
                   nothing and refreshes every 30 seconds once games start.
-                  {espnAt && <> Updated {shortAge(Date.now() - espnAt)}.</>}
-                  {" "}Only the multi-book comparison, team facts and the game read still spend
-                  Claude usage.
+                  {todayAt && <> Updated {shortAge(Date.now() - todayAt)}.</>}
+                  {" "}Open a game and the odds, injuries, form and both models load free too —
+                  only the written read spends Claude usage.
                 </>
               ) : (
                 <>
@@ -1489,14 +1474,13 @@ export default function LineDesk() {
                       ) : (
                         <>
                           <span className="line none">—</span>
-                          <span className="sub">NO MODEL</span>
+                          <span className="sub">NO LINE YET</span>
                         </>
                       )}
                     </span>
                   </button>
                   {open === g.id && (
-                    <Insight game={g} entry={entries[g.id] || {}} patch={patch(g.id)}
-                      devigKey={devigKey} benchmark={benchmark} />
+                    <Insight game={g} entry={entries[g.id] || {}} patch={patch(g.id)} />
                   )}
                 </div>
               );
@@ -1585,14 +1569,16 @@ export default function LineDesk() {
         {tab === "top25" && <Top25 />}
 
         <div className="ft">
-          <p>Expected value is measured against whichever benchmark you pick, so a positive
-            number means a book is off the market — not that the market is wrong.</p>
+          <p>Expected value is measured against the other books loaded for that game — Pinnacle
+            alone when it's among them, the average otherwise. A positive number means one book
+            is off the market, not that the market is wrong. Prices are de-vigged with a power
+            solve rather than proportional scaling, which matters on heavy favorites.</p>
           <p>Comparing different spreads assumes margins sit on a normal curve ({SIG_M} points)
             and totals on another ({SIG_T} points). Football isn't smooth — 3 and 7 carry more
             weight than that math allows — so be skeptical of small edges near key numbers.
             Whole-number lines can push, which these probabilities ignore.</p>
-          <p>Team colors are approximations for legibility on a dark screen, not official marks.
-            Odds you enter are saved on this device. If betting has stopped being fun,
+          <p>School colors come from ESPN, lifted in lightness where the real hex would be
+            unreadable on a dark screen. Odds and notes are saved on this device. If betting has stopped being fun,
             1-800-GAMBLER is free and confidential.</p>
         </div>
       </div>
