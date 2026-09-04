@@ -378,6 +378,90 @@ const invNorm = (p) => {
 };
 
 const SIG_M = 16.0, SIG_T = 10.5;
+
+/* ────────────────────────────────────────────────
+   Football margins are not a bell curve. Games end
+   on 3 and 7 far more often than a smooth curve
+   allows, because those are the scoring increments.
+   Every free tool prices spreads off a normal
+   distribution and therefore misprices exactly the
+   numbers that matter most.
+
+   These are relative frequency multipliers applied
+   on top of the normal shape. They're approximate
+   — derived from the general shape of FBS results,
+   not fitted to a specific season — and college
+   football's spikes are flatter than the NFL's
+   because scoring is higher and more varied.
+   ──────────────────────────────────────────────── */
+const MARGIN_MULT = {
+  0: 0.10, 1: 0.95, 2: 0.92, 3: 1.95, 4: 1.05, 5: 0.88, 6: 1.02, 7: 1.70,
+  8: 0.88, 9: 0.82, 10: 1.42, 11: 0.86, 12: 0.78, 13: 0.88, 14: 1.38,
+  15: 0.82, 16: 0.78, 17: 1.28, 18: 0.78, 19: 0.74, 20: 1.06, 21: 1.24,
+  22: 0.80, 23: 0.82, 24: 1.10, 25: 0.86, 26: 0.84, 27: 0.90, 28: 1.08,
+  31: 0.98, 35: 0.96,
+};
+const mult = (m) => MARGIN_MULT[Math.abs(m)] ?? 0.92;
+
+const phi = (z) => Math.exp(-0.5 * z * z);
+
+/* Discrete margin distribution: normal shape, key numbers weighted,
+   renormalised. Returns P(margin = m) for integer m. */
+function marginPmf(mu, sigma) {
+  const lo = Math.round(mu - 4.2 * sigma), hi = Math.round(mu + 4.2 * sigma);
+  const out = [];
+  let tot = 0;
+  for (let m = lo; m <= hi; m++) {
+    const w = phi((m - mu) / sigma) * mult(m);
+    out.push([m, w]); tot += w;
+  }
+  return { lo, hi, p: out.map(([m, w]) => [m, w / tot]) };
+}
+
+// P(home covers a spread of L), plus the push chance on whole numbers.
+function coverProb(mu, L, sigma) {
+  const need = -L;
+  const { p } = marginPmf(mu, sigma);
+  let win = 0, push = 0;
+  for (const [m, q] of p) {
+    if (m > need) win += q;
+    else if (m === need) push += q;
+  }
+  return { win, push, lose: 1 - win - push };
+}
+
+// Invert: what expected margin makes a book's de-vigged cover price true?
+function impliedMargin(coverP, L, sigma) {
+  let lo = -80, hi = 80;
+  for (let i = 0; i < 44; i++) {
+    const mid = (lo + hi) / 2;
+    const c = coverProb(mid, L, sigma);
+    const adj = c.win + c.push / 2;
+    if (adj < coverP) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// Probability mass landing exactly on one margin.
+function massAt(mu, m, sigma) {
+  const hit = marginPmf(mu, sigma).p.find((x) => x[0] === m);
+  return hit ? hit[1] : 0;
+}
+
+// Translate a probability edge into cents of price, priced around a coin flip.
+function centsOf(v) {
+  const a = -(100 * 0.5) / 0.5;
+  const p1 = Math.min(0.5 + v, 0.98);
+  const b = -(100 * p1) / (1 - p1);
+  return Math.abs(b - a);
+}
+
+// What a half point is actually worth here, in probability.
+function halfPointValue(mu, L, sigma) {
+  const a = coverProb(mu, L, sigma);
+  const b = coverProb(mu, L - 0.5, sigma);
+  return Math.abs((a.win + a.push / 2) - (b.win + b.push / 2));
+}
 const round5 = (x) => Math.round(x * 2) / 2;
 const modelLine = (wp) => (wp == null ? null : -SIG_M * invNorm(wp / 100));
 const trim = (x) => Number(x).toFixed(1).replace(/\.0$/, "");
@@ -425,7 +509,7 @@ function shop(market, game, rows, devig) {
     if (market !== "ml" && !isFinite(L)) return null;
     const [fa, fb] = devig([pa, pb]);
     if (market === "ml") return { v: fb, L, pa, pb };
-    if (market === "sp") return { v: SIG_M * invNorm(fb) - L, L, pa, pb };
+    if (market === "sp") return { v: impliedMargin(fb, L, SIG_M), L, pa, pb };
     return { v: L + SIG_T * invNorm(fa), L, pa, pb };
   };
 
@@ -450,7 +534,11 @@ function shop(market, game, rows, devig) {
 
   const fairAt = (q) => {
     if (market === "ml") return [1 - cons, cons];
-    if (market === "sp") { const pb = normCdf((cons + q.L) / SIG_M); return [1 - pb, pb]; }
+    if (market === "sp") {
+      const c = coverProb(cons, q.L, SIG_M);
+      const pb = c.win + c.push / 2;   // a push returns the stake
+      return [1 - pb, pb];
+    }
     const pa = normCdf((cons - q.L) / SIG_T); return [pa, 1 - pa];
   };
 
@@ -604,6 +692,13 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .fl { font-family:'Oswald',sans-serif; font-weight:600; font-size:16px; display:block;
   margin-top:3px; line-height:1.4; }
 .fl .sep { color:var(--edge); font-weight:400; }
+.keybox { background:var(--bg); border-left:3px solid #E3B448; border-radius:0 3px 3px 0;
+  padding:13px 14px; margin-top:16px; }
+.kh { display:block; font-family:'Oswald',sans-serif; font-weight:600; font-size:15px;
+  color:#E3B448; margin:3px 0 7px; }
+.kb { margin:0 0 7px; font-size:12.5px; line-height:1.55; color:#C9D1DE; }
+.kb.dim { color:var(--dim); font-size:11.5px; margin-bottom:0; }
+.kb b { color:#F2F5FA; }
 .verdict { border-left:3px solid; border-radius:0 3px 3px 0; padding:13px 14px; margin-bottom:12px;
   background:var(--bg); }
 .verdict.p { border-left-color:var(--turf); } .verdict.n { border-left-color:var(--turf); }
@@ -1074,6 +1169,17 @@ function Insight({ game, entry, patch }) {
   };
   const v = verdict();
 
+  // What the half point around this line is actually worth.
+  const kn = (() => {
+    if (mk !== "sp" || !res || mktMu == null) return null;
+    const L = res.bestB.L;
+    if (L == null) return null;
+    const near = [3, 7, 10, 14, 17, 21].filter((k) => Math.abs(Math.abs(L) - k) <= 1.0);
+    const v = halfPointValue(mktMu, L, SIG_M);
+    return { L, near, v, cents: centsOf(v), onKey: Number.isInteger(L),
+             mass: massAt(mktMu, Math.abs(Math.round(L)), SIG_M) };
+  })();
+
   const marks = [];
   if (mk === "sp") {
     if (feedMu != null) marks.push({ k: "Feed", v: feedMu, txt: mLabel(feedMu), c: mColor(feedMu) });
@@ -1206,6 +1312,31 @@ function Insight({ game, entry, patch }) {
       ) : !busy && (
         <p className="empty">No book has posted this game. Common for small-school matchups —
           they often never get a market at all.</p>
+      )}
+
+      {kn && (
+        <div className="keybox">
+          <span className="role">Key numbers</span>
+          <span className="kh">
+            {kn.onKey
+              ? `The line is sitting on ${Math.abs(kn.L)}.`
+              : kn.near.length
+                ? `Half a point off ${kn.near[0]}.`
+                : `No key number nearby.`}
+          </span>
+          <p className="kb">
+            {(kn.mass * 100).toFixed(1)}% of games with this projected margin land exactly on{" "}
+            {Math.abs(Math.round(kn.L))}. Moving this line half a point is worth{" "}
+            <b>{(kn.v * 100).toFixed(1)}%</b> — about <b>{Math.round(kn.cents)} cents</b> of price.
+            {kn.v > 0.018
+              ? " That's an expensive half point. Paying more than that to buy it loses money."
+              : " That's a cheap half point, so the number matters less than the price here."}
+          </p>
+          <p className="kb dim">
+            Priced off a discrete margin distribution weighted toward 3 and 7, not a normal
+            curve — which is why this number isn't flat across the board.
+          </p>
+        </div>
       )}
 
       {mk === "sp" && marks.length >= 2 && (
@@ -1573,10 +1704,13 @@ export default function LineDesk() {
             alone when it's among them, the average otherwise. A positive number means one book
             is off the market, not that the market is wrong. Prices are de-vigged with a power
             solve rather than proportional scaling, which matters on heavy favorites.</p>
-          <p>Comparing different spreads assumes margins sit on a normal curve ({SIG_M} points)
-            and totals on another ({SIG_T} points). Football isn't smooth — 3 and 7 carry more
-            weight than that math allows — so be skeptical of small edges near key numbers.
-            Whole-number lines can push, which these probabilities ignore.</p>
+          <p>Spreads are priced off a discrete margin distribution — a normal shape ({SIG_M}
+            points) reweighted so 3 and 7 carry the extra mass they carry in real games —
+            and pushes on whole numbers are counted as returned stakes rather than ignored.
+            The weightings are approximate, shaped from how FBS results generally fall rather
+            than fitted to one season, so treat the half-point figures as well-informed
+            estimates. Totals still use a plain curve ({SIG_T} points); key totals exist but
+            are far weaker than key spreads.</p>
           <p>School colors come from ESPN, lifted in lightness where the real hex would be
             unreadable on a dark screen. Odds and notes are saved on this device. If betting has stopped being fun,
             1-800-GAMBLER is free and confidential.</p>
