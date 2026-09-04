@@ -1453,28 +1453,6 @@ function Insight({ game, entry, patch }) {
   const espnMu = sum && sum.espnWp != null ? -modelLine(sum.espnWp) : null;
   const mktMu = res && mk === "sp" ? res.cons : null;
 
-  // The verdict is arithmetic on the numbers above, not a generated opinion.
-  const verdict = () => {
-    if (mktMu == null) return null;
-    const models = [feedMu, espnMu].filter((x) => x != null);
-    if (!models.length) return null;
-    const avg = models.reduce((a, b) => a + b, 0) / models.length;
-    const band = models.length > 1 ? Math.abs(models[0] - models[1]) : 3;
-    const gap = avg - mktMu;
-    const key = [3, 7, 10, 14].find((k) => Math.abs(Math.abs(mktMu) - k) < 1);
-    if (Math.abs(gap) <= Math.max(band / 2, 1.2)) {
-      return { tone: "z", head: "No edge here.",
-        body: `The market sits inside where the models already are. A ${Math.abs(gap).toFixed(1)}-point ` +
-          `difference is smaller than the ${band.toFixed(1)} points the models disagree with each other by.` };
-    }
-    const side = gap > 0 ? game.home : game.away;
-    return { tone: gap > 0 ? "p" : "n",
-      head: `Models like ${side} by ${Math.abs(gap).toFixed(1)} more than the market.`,
-      body: `Models average ${mLabel(avg)}, market is ${mLabel(mktMu)}.` +
-        (key ? ` But the line is sitting on ${key}, where this app's math is least reliable — discount it.` : "") };
-  };
-  const v = verdict();
-
   // What the half point around this line is actually worth.
   const kn = (() => {
     if (mk !== "sp" || !res || mktMu == null) return null;
@@ -1485,6 +1463,47 @@ function Insight({ game, entry, patch }) {
     return { L, near, v, cents: centsOf(v), onKey: Number.isInteger(L),
              mass: massAt(mktMu, Math.abs(Math.round(L)), SIG_M) };
   })();
+
+  // The verdict is arithmetic on the numbers above, not a generated opinion.
+  const verdict = () => {
+    if (mktMu == null || !res) return null;
+    const models = [feedMu, espnMu].filter((x) => x != null);
+    if (!models.length) return null;
+    const avg = models.reduce((a, b) => a + b, 0) / models.length;
+    const gap = avg - mktMu;
+
+    // How much disagreement it takes before this counts as anything. One
+    // model has nothing to cross-check it; one book isn't a market.
+    const band = models.length > 1 ? Math.abs(models[0] - models[1]) : 4;
+    let need = Math.max(band / 2, 1.5);
+    const thin = [];
+    if (models.length === 1) {
+      need += 1;
+      thin.push("only one model, so there's nothing to cross-check it against");
+    }
+    if (res.count === 1) {
+      need += 1;
+      thin.push(`only one book posted, so "market" here means ${
+        (entry.bookNames || {})[res.bestB.bk.k] || res.bestB.bk.n} on its own`);
+    }
+    const caveat = thin.length ? ` Thin evidence though — ${thin.join(", and ")}.` : "";
+
+    if (Math.abs(gap) <= need) {
+      return { tone: "z", head: "Nothing worth betting here.",
+        body: `Models average ${mLabel(avg)}, market is ${mLabel(mktMu)} — ` +
+          `${Math.abs(gap).toFixed(1)} points apart, inside the ${need.toFixed(1)} it would take ` +
+          `to mean anything.` + caveat };
+    }
+    const side = gap > 0 ? game.home : game.away;
+    return { tone: gap > 0 ? "p" : "n",
+      head: `Models like ${side} by ${Math.abs(gap).toFixed(1)} more than the market.`,
+      body: `Models average ${mLabel(avg)}, market is ${mLabel(mktMu)}.` + caveat +
+        (kn && kn.near.length
+          ? ` The line sits near ${kn.near[0]}, where half a point is worth ${
+              (kn.v * 100).toFixed(1)}% — check the key-number panel before paying to move it.`
+          : "") };
+  };
+  const v = verdict();
 
   const marks = [];
   if (mk === "sp") {
@@ -1569,8 +1588,9 @@ function Insight({ game, entry, patch }) {
       {res ? (
         <div className="out">
           <p className="hint">
-            Best of {res.count} book{res.count === 1 ? "" : "s"}, priced against the{" "}
-            {res.usePin ? "Pinnacle" : "consensus"} number. Loaded free from ESPN.
+            {res.count === 1
+              ? `Only ${(entry.bookNames || {})[res.bestB.bk.k] || res.bestB.bk.n} has posted this game, so there's nothing to shop against yet.`
+              : `Best of ${res.count} books, priced against the ${res.usePin ? "Pinnacle" : "consensus"} number. Loaded free from ESPN.`}
           </p>
           <div className="pick">
             <span className="lft">
@@ -1581,7 +1601,8 @@ function Insight({ game, entry, patch }) {
               </span>
               <em>{(entry.bookNames || {})[res.bestA.bk.k] || res.bestA.bk.n}</em>
             </span>
-            <span className={"ev " + evCls(res.bestA.evA)}>{evTxt(res.bestA.evA)}</span>
+            <span className={"ev " + (res.count === 1 ? "z" : evCls(res.bestA.evA))}>
+              {res.count === 1 ? "—" : evTxt(res.bestA.evA)}</span>
           </div>
           <div className="pick">
             <span className="lft">
@@ -1592,7 +1613,8 @@ function Insight({ game, entry, patch }) {
               </span>
               <em>{(entry.bookNames || {})[res.bestB.bk.k] || res.bestB.bk.n}</em>
             </span>
-            <span className={"ev " + evCls(res.bestB.evB)}>{evTxt(res.bestB.evB)}</span>
+            <span className={"ev " + (res.count === 1 ? "z" : evCls(res.bestB.evB))}>
+              {res.count === 1 ? "—" : evTxt(res.bestB.evB)}</span>
           </div>
           <div className="rule">
             <div className="kv"><span>{res.usePin ? "Pinnacle" : "Consensus"}</span>
@@ -1607,7 +1629,13 @@ function Insight({ game, entry, patch }) {
                 <b style={{ color: "#FF5A47" }}>{pct(res.worstHold)}</b></div>
             )}
           </div>
-          {res.bestA.evA < 0 && res.bestB.evB < 0 && (
+          {res.count === 1 ? (
+            <p className="hint" style={{ margin: "11px 0 0", paddingTop: 11, borderTop: "1px solid #28303F" }}>
+              Expected value is blank on purpose. With a single book the benchmark would be that
+              same book, so the number would just be its own {pct(res.shoppedCost)} vig handed
+              back to you as though it were analysis. It means something once a second book posts.
+            </p>
+          ) : res.bestA.evA < 0 && res.bestB.evB < 0 && (
             <p className="hint" style={{ margin: "11px 0 0", paddingTop: 11, borderTop: "1px solid #28303F" }}>
               Both sides negative is normal — every price carries vig and the benchmark is these
               same books averaged. A bet clears zero only when one book sits far enough off the
