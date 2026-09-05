@@ -946,6 +946,11 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .sweepbar { margin-bottom:12px; }
 .playcard { display:flex; gap:12px; background:var(--card); border-left:4px solid var(--turf);
   border-radius:0 3px 3px 0; padding:14px; margin-bottom:8px; }
+.conf { font-size:9.5px; letter-spacing:.08em; padding:2px 6px; border-radius:2px;
+  margin-right:7px; font-weight:600; }
+.conf.strong { background:#13301F; color:#5FD69B; }
+.conf.fair { background:#2E2612; color:#E3B448; }
+.conf.thin { background:#2A2E36; color:#9AA5B5; }
 .opengame { display:inline-block; margin-top:11px; background:none; border:1px solid var(--edge);
   color:var(--dim); font-family:'Oswald',sans-serif; font-size:10.5px; text-transform:uppercase;
   letter-spacing:.07em; padding:7px 11px; border-radius:2px; cursor:pointer; }
@@ -1249,8 +1254,9 @@ function assess(game, sum) {
   if (modelMu == null) return null;
 
   const fail = [];
-  // One book isn't a market, and two that copy each other aren't either.
-  if (res.count < 3) fail.push(`only ${res.count} book${res.count === 1 ? "" : "s"} priced it`);
+  // A single book's line is real, it just can't be cross-checked. Price that
+  // as a higher hurdle rather than refusing to look.
+  const thin = res.count === 1 ? 1.5 : res.count === 2 ? 0.75 : 0;
 
   const gap = modelMu - res.cons;
   const sideHome = gap > 0;
@@ -1274,13 +1280,19 @@ function assess(game, sum) {
   if (Math.abs(res.cons) >= 21 || Math.abs(modelMu) >= 21)
     fail.push(`line is past 21 points, where turning a win probability into a spread drifts by several points on its own`);
 
-  const need = 2.5 + (onKey ? 1.5 : 0);
+  const need = 2.5 + (onKey ? 1.5 : 0) + thin;
   if (Math.abs(gap) < need)
-    fail.push(`gap of ${Math.abs(gap).toFixed(1)} is under the ${need.toFixed(1)} required${onKey ? " on a key number" : ""}`);
+    fail.push(`gap of ${Math.abs(gap).toFixed(1)} is under the ${need.toFixed(1)} required${
+      onKey && thin ? " on a key number with this few books"
+      : onKey ? " on a key number"
+      : thin ? ` with only ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
   if (ev < 0.02)
     fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
+  if (ev > 0.25)
+    fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — that size means the model is broken, not the book`);
 
   return { kind: "spread", game, res, gap, sideHome, best, L, ev, pModel, hp, onKey, fail,
+           books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            side: sideHome ? game.home : game.away,
            price: price,
            score: ev * Math.min(1, res.count / 4) * (onKey ? 0.7 : 1) };
@@ -1318,13 +1330,19 @@ function assessTotal(game, sum) {
   if (!proj) return null;                     // no scoring model, no opinion
 
   const fail = [];
-  if (res.count < 3) fail.push(`only ${res.count} book${res.count === 1 ? "" : "s"} priced it`);
+  const thin = res.count === 1 ? 1 : res.count === 2 ? 0.5 : 0;
 
-  const gap = proj.total - res.cons;
+  // The market prices injuries, pace, weather and personnel that raw scoring
+  // averages know nothing about. Treat its number as information and keep
+  // only a fraction of the model's disagreement.
+  const SHRINK = 0.35;
+  const rawGap = proj.total - res.cons;
+  const used = res.cons + SHRINK * rawGap;
+  const gap = used - res.cons;
   const over = gap > 0;
   const best = over ? res.bestA : res.bestB;
   const line = best.L;
-  const pOver = 1 - normCdf((line - proj.total) / SIG_T);
+  const pOver = 1 - normCdf((line - used) / SIG_T);
   const pModel = over ? pOver : 1 - pOver;
   const price = parseFloat(over ? best.oa : best.ob);
   const w = payout(price);
@@ -1333,12 +1351,19 @@ function assessTotal(game, sum) {
 
   // Scoring rates on a handful of games are noise. Strictest gate in the app.
   if (proj.games < 6) fail.push(`only ${proj.games} games of scoring on these teams`);
-  if (Math.abs(gap) < 3.5)
-    fail.push(`projection is ${Math.abs(gap).toFixed(1)} points off the total, under the 3.5 required`);
+  // A book does not miss a total by ten points. That size of disagreement is
+  // the model failing, and reading it as edge is how you lose money quickly.
+  if (Math.abs(rawGap) > 10)
+    fail.push(`model is ${Math.abs(rawGap).toFixed(1)} points off the market, which is model error rather than an edge`);
+  if (Math.abs(gap) < 2 + thin)
+    fail.push(`only ${Math.abs(gap).toFixed(1)} points of edge once the market is weighted in, under the ${(2 + thin).toFixed(1)} needed${thin ? ` with ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
   if (ev < 0.02)
     fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
+  if (ev > 0.25)
+    fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — a number that size means the model is broken, not that the book is`);
 
   return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail,
+           books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            games: proj.games, proj: proj.total,
            seasons: EMP && EMP.years ? EMP.years.join(", ") : null,
            side: over ? `Over ${trim(line)}` : `Under ${trim(line)}`,
@@ -1361,7 +1386,7 @@ function assessML(game, sum) {
   const pHome = c.win + c.push / 2;
 
   const fail = [];
-  if (res.count < 3) fail.push(`only ${res.count} book${res.count === 1 ? "" : "s"} priced it`);
+  const thin = res.count === 1 ? 0.02 : res.count === 2 ? 0.01 : 0;
 
   const sideHome = pHome > res.cons;                 // model likes home more than market does
   const pModel = sideHome ? pHome : 1 - pHome;
@@ -1377,10 +1402,14 @@ function assessML(game, sum) {
   if (price > 500) fail.push(`priced at ${fmtOdds(price)}, past where this model is trustworthy`);
   if (Math.abs(modelMu) >= 21)
     fail.push(`a ${trim(Math.abs(modelMu))}-point projection is past where this model holds up`);
-  if (edge < 0.04) fail.push(`only ${(edge * 100).toFixed(1)} points of win probability between model and market`);
+  if (edge < 0.04 + thin)
+    fail.push(`${(edge * 100).toFixed(1)} points of win probability between model and market, under the ${((0.04 + thin) * 100).toFixed(0)} needed${thin ? ` with ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
   if (ev < 0.02) fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
+  if (ev > 0.30)
+    fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — that size means the model is broken, not the book`);
 
   return { kind: "moneyline", game, res, ev, pModel, edge, best, price, fail,
+           books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            sideHome, side: sideHome ? game.home : game.away,
            score: ev * Math.min(1, res.count / 4) * 0.85 };
 }
@@ -1472,8 +1501,9 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
     <ul className="why">
       {c.kind === "total" ? (
         <>
-          <li>Scoring rates project {c.proj.toFixed(1)}, {Math.abs(c.gap).toFixed(1)} points
-              {c.over ? " above" : " below"} the market's {trim(c.res.cons)} across {c.res.count}
+          <li>Scoring rates project {c.proj.toFixed(1)} against the market's {trim(c.res.cons)}.
+              Weighted toward the market, that's {Math.abs(c.gap).toFixed(1)} points
+              {c.over ? " over" : " under"} across {c.res.count}
               {c.res.count === 1 ? " book" : " books"}.</li>
           <li>Lands this side {(c.pModel * 100).toFixed(0)}% of the time if that holds —
               <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at {fmtOdds(c.price)}.</li>
@@ -1513,10 +1543,11 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
       {swept && (
         <div className="stale" style={{ borderLeftColor: plays.length ? "#35D07F" : "#7E8899" }}>
           {cands.length} spots judged across {board.length} games.{" "}
-          {oneBook > cands.length * 0.6 && (
-            <> <b style={{ color: "#E3B448" }}>Most of these have a single book.</b> ESPN's feed
-            carries one price on small games, and one price isn't a market — that's what's thinning
-            this card, not the thresholds.</>
+          {plays.length < 6 && oneBook > cands.length * 0.6 && (
+            <> <b style={{ color: "#E3B448" }}>Most of these rest on a single book.</b> ESPN's feed
+            carries one price on small games, so those picks can't be cross-checked and have to
+            clear a higher bar. A second odds source is what would open this up, and it isn't
+            something ESPN can give.</>
           )}{" "}
           {plays.length
             ? <><b>{plays.length} cleared the bar.</b> Everything below that is ranked but didn't, and says why.</>
@@ -1535,13 +1566,22 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
         </div>
       )}
 
-      {plays.length > 0 && <p className="tier">Plays · cleared every test</p>}
+      {plays.length > 0 && (
+        <p className="tier">
+          Plays · cleared every test · <span style={{ color: "#5FD69B" }}>Strong</span> means three
+          or more books agree the line is real, <span style={{ color: "#9AA5B5" }}>Thin</span> means
+          one book and a correspondingly higher bar
+        </p>
+      )}
       {plays.map((c, i) => (
         <div className="playcard" key={c.kind + c.game.id}>
           <span className="pnum">{i + 1}</span>
           <div className="pbody">
             {headline(c)}
-            <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
+            <span className="pbook">
+              <span className={"conf " + c.conf.toLowerCase()}>{c.conf}</span>
+              {c.best.bk.n} · {c.game.away} at {c.game.home}
+            </span>
             {reasons(c)}
             <button className="opengame" onClick={() => onOpen(c.game.id)}>
               Open the full game →
@@ -1557,7 +1597,10 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
             <div className="playcard lean" key={c.kind + c.game.id}>
               <div className="pbody">
                 {headline(c)}
-                <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
+                <span className="pbook">
+                  <span className={"conf " + c.conf.toLowerCase()}>{c.conf}</span>
+                  {c.best.bk.n} · {c.game.away} at {c.game.home}
+                </span>
                 <p className="shortfall">Falls short: {c.fail[0]}.</p>
                 {reasons(c)}
                 <button className="opengame" onClick={() => onOpen(c.game.id)}>
@@ -1589,8 +1632,11 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
 
       {swept && (
         <p className="empty">
-          Spread and moneyline numbers assume ESPN's projection is right; totals assume the scoring
-          model is. Both are single models with no second opinion behind them. A play clearing the
+          Totals are weighted 35% toward the model and 65% toward the market, because the price
+          already contains injuries, pace and personnel that raw scoring averages don't. Any
+          expected value above about 25% is rejected on sight — real edges are a few percent, and
+          a number that large means the model broke, not the book. Spread and moneyline numbers
+          assume ESPN's projection is right; totals assume the scoring model is. Both are single models with no second opinion behind them. A play clearing the
           bar means the model and the market disagree by more than the market disagrees with itself
           — not that the game is won. Leans are shown because an empty screen isn't useful, not
           because they're worth the same stake.
