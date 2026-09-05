@@ -1148,7 +1148,7 @@ function Top25() {
 /* Judge one game against a deliberately strict bar. Returns a rejection
    far more often than a pick, which is the correct answer most weeks. */
 function assess(game, sum) {
-  if (!sum || !sum.pick) return null;
+  if (!sum || !Array.isArray(sum.pick)) return null;
   const rows = {};
   for (const b of sum.pick) {
     if (b.sp != null)
@@ -1178,7 +1178,7 @@ function assess(game, sum) {
     fail.push("the two models disagree on which side the market has wrong");
   const sideHome = gap > 0;
   const best = sideHome ? res.bestB : res.bestA;
-  if (best.L == null) return null;
+  if (!best || best.L == null) return null;
   const L = sideHome ? best.L : -best.L;
 
   // Expected value if the projection is right — not against the market,
@@ -1224,10 +1224,25 @@ function assess(game, sum) {
 /* Projected total from scoring rates, regressed hard toward the league mean
    because a handful of games says very little. Null when there's no
    calibration to build on — no model, no pick. */
+/* Expected margin from the same scoring ratings that drive totals. Naive,
+   but genuinely independent of ESPN's projection — which is the point. */
+function projectMargin(hAb, aAb) {
+  if (!EMP || !EMP.teams || !EMP.lgPts) return null;
+  const H = EMP.teams[hAb], A = EMP.teams[aAb];
+  if (!H || !A || !H.g || !A.g) return null;
+  const L = EMP.lgPts;
+  const reg = (rate, g) => (rate * g + L * 8) / (g + 8);
+  const hOff = reg(H.pf / H.g, H.g), hDef = reg(H.pa / H.g, H.g);
+  const aOff = reg(A.pf / A.g, A.g), aDef = reg(A.pa / A.g, A.g);
+  const expH = hOff + aDef - L, expA = aOff + hDef - L;
+  return { mu: expH - expA + (EMP.hfa != null ? EMP.hfa : 2.5),
+           games: Math.min(H.g, A.g) };
+}
+
 function projectTotal(hAb, aAb) {
   if (!EMP || !EMP.teams || !EMP.lgPts) return null;
   const H = EMP.teams[hAb], A = EMP.teams[aAb];
-  if (!H || !A) return null;
+  if (!H || !A || !H.g || !A.g) return null;
   const L = EMP.lgPts;
   const reg = (rate, g) => (rate * g + L * 8) / (g + 8);   // 8 games of prior
   const hOff = reg(H.pf / H.g, H.g), hDef = reg(H.pa / H.g, H.g);
@@ -1237,7 +1252,7 @@ function projectTotal(hAb, aAb) {
 }
 
 function assessTotal(game, sum) {
-  if (!sum || !sum.pick) return null;
+  if (!sum || !Array.isArray(sum.pick)) return null;
   const rows = {};
   for (const b of sum.pick) {
     if (b.tot != null)
@@ -1261,6 +1276,7 @@ function assessTotal(game, sum) {
   const gap = used - res.cons;
   const over = gap > 0;
   const best = over ? res.bestA : res.bestB;
+  if (!best || best.L == null) return null;
   const line = best.L;
   const pOver = 1 - normCdf((line - used) / SIG_T);
   const pModel = over ? pOver : 1 - pOver;
@@ -1291,7 +1307,7 @@ function assessTotal(game, sum) {
 }
 
 function assessML(game, sum) {
-  if (!sum || !sum.pick) return null;
+  if (!sum || !Array.isArray(sum.pick)) return null;
   const rows = {};
   for (const b of sum.pick) {
     if (b.mlA != null && b.mlB != null) rows[b.k] = { a: String(b.mlA), b: String(b.mlB) };
