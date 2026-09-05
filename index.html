@@ -98,18 +98,29 @@
 </script>
 
 <script>
-  window.addEventListener("error", function (e) {
+  window.__ldError = function (e) {
     var r = document.getElementById("root");
-    if (r && !r.hasChildNodes()) {
-      r.innerHTML = '<div style="font-family:system-ui;color:#F2F5FA;background:#2E1512;' +
-        'padding:20px;margin:16px;border-radius:4px;border-left:4px solid #FF5A47;' +
-        'line-height:1.6;font-size:14px"><b>The app failed to start.</b><br>' +
-        (e.message || e.error) + '<br><span style="color:#B9C3D1;font-size:12px">' +
-        (e.filename ? e.filename + " line " + e.lineno : "") + '</span></div>';
-    }
+    if (!r) return;
+    var msg = (e && (e.stack || e.message)) || String(e);
+    r.innerHTML = '<div style="font-family:ui-monospace,Menlo,monospace;color:#F2F5FA;' +
+      'background:#2E1512;padding:18px;margin:16px;border-radius:4px;border-left:4px solid #FF5A47;' +
+      'line-height:1.55;font-size:12px;white-space:pre-wrap;word-break:break-word">' +
+      '<b style="font-family:system-ui;font-size:15px">The app failed to start.</b>\n\n' +
+      msg.replace(/</g, "&lt;") + '</div>';
+  };
+  window.addEventListener("error", function (ev) {
+    var r = document.getElementById("root");
+    if (r && !r.hasChildNodes())
+      window.__ldError(ev.error || (ev.message + " — " + (ev.filename || "") + ":" + (ev.lineno || "")));
+  });
+  window.addEventListener("unhandledrejection", function (ev) {
+    var r = document.getElementById("root");
+    if (r && !r.hasChildNodes()) window.__ldError(ev.reason);
   });
 </script>
 <script type="text/babel" data-presets="react">
+(function () {
+try {
 const { useState, useMemo, useEffect } = React;
 
 
@@ -2732,7 +2743,16 @@ function LineDesk() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<LineDesk />);
+class ErrorBoundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err) { window.__ldError(err); }
+  render() { return this.state.err ? null : this.props.children; }
+}
+ReactDOM.createRoot(document.getElementById("root"))
+  .render(<ErrorBoundary><LineDesk /></ErrorBoundary>);
+} catch (e) { window.__ldError(e); }
+})();
 </script>
 </body>
 </html>
