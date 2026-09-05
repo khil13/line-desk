@@ -982,6 +982,8 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .conf.strong { background:#13301F; color:#5FD69B; }
 .conf.fair { background:#2E2612; color:#E3B448; }
 .conf.thin { background:#2A2E36; color:#9AA5B5; }
+.altnote { margin:9px 0 0; font-size:11.5px; line-height:1.5; color:var(--dim);
+  border-left:2px solid var(--edge); padding-left:9px; }
 .opengame { display:inline-block; margin-top:11px; background:none; border:1px solid var(--edge);
   color:var(--dim); font-family:'Oswald',sans-serif; font-size:10.5px; text-transform:uppercase;
   letter-spacing:.07em; padding:7px 11px; border-radius:2px; cursor:pointer; }
@@ -1548,10 +1550,38 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
     g.state ? g.state === "pre" : !(g.hs != null && g.as != null));
   const done = board.length - upcoming.length;
 
-  const cands = upcoming.flatMap((g) => {
+  const raw = upcoming.flatMap((g) => {
     const sum = (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum;
     return [assess(g, sum), assessML(g, sum), assessTotal(g, sum)].filter(Boolean);
   });
+
+  /* A spread and a moneyline on the same team are the same opinion at two
+     prices — listing both invites staking one position twice. Keep the
+     better one and note the other. Totals are a separate market, so they
+     stand on their own. */
+  const cands = (() => {
+    const out = [];
+    const byGame = {};
+    for (const c of raw) (byGame[c.game.id] = byGame[c.game.id] || []).push(c);
+    for (const list of Object.values(byGame)) {
+      const totals = list.filter((c) => c.kind === "total");
+      const sides = list.filter((c) => c.kind !== "total");
+      out.push(...totals);
+      const home = sides.filter((c) => c.sideHome);
+      const away = sides.filter((c) => !c.sideHome);
+      for (const grp of [home, away]) {
+        if (!grp.length) continue;
+        const ok = grp.filter((c) => c.fail.length === 0);
+        const pool = ok.length ? ok : grp;
+        const keep = pool.reduce((a, b) => (b.score > a.score ? b : a));
+        const other = grp.find((c) => c !== keep && c.fail.length === 0);
+        out.push(other
+          ? { ...keep, alt: `${other.kind === "moneyline" ? "Moneyline" : "Spread"} on the same side is also live at ${fmtOdds(other.price)}, worth ${(other.ev * 100).toFixed(1)}% — the same opinion, not a second bet.` }
+          : keep);
+      }
+    }
+    return out;
+  })();
 
   // Rank everything, then tier it. A weak spot still gets shown — it just
   // never gets called a play.
@@ -1601,8 +1631,9 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </>
       ) : (
         <>
-          <li>Model has this side winning {(c.pModel * 100).toFixed(0)}% outright, {(c.edge * 100).toFixed(1)}
-              points above the market across {c.res.count} {c.res.count === 1 ? "book" : "books"}.</li>
+          <li>Model has this side winning {(c.pModel * 100).toFixed(0)}% outright,{" "}
+              {(c.edge * 100).toFixed(1)} points above the market across {c.res.count}{" "}
+              {c.res.count === 1 ? "book" : "books"}.</li>
           <li>At {fmtOdds(c.price)} that's <b>{c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> if the projection holds.</li>
           <li>Straight win-loss — no key number, no push.</li>
         </>
@@ -1668,6 +1699,7 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
               {c.best.bk.n} · {c.game.away} at {c.game.home}
             </span>
             {reasons(c)}
+            {c.alt && <p className="altnote">{c.alt}</p>}
             <button className="opengame" onClick={() => onOpen(c.game.id)}>
               Open the full game →
             </button>
@@ -1688,6 +1720,7 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
                 </span>
                 <p className="shortfall">Falls short: {c.fail[0]}.</p>
                 {reasons(c)}
+                {c.alt && <p className="altnote">{c.alt}</p>}
                 <button className="opengame" onClick={() => onOpen(c.game.id)}>
                   Open the full game →
                 </button>
