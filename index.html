@@ -522,6 +522,7 @@ const mult = (m) => {
    finished. Free, and it turns the model from my estimate into your data. */
 async function calibrate(years, onProgress) {
   const margins = [], totals = [];
+  const team = {};                 // scoring rates, for a totals model
   const seen = new Set();          // ESPN can return a game under two queries
   let done = 0, idx = 0;
 
@@ -538,6 +539,17 @@ async function calibrate(years, onProgress) {
       if (!isFinite(hs) || !isFinite(as)) continue;
       seen.add(ev.id);
       margins.push(hs - as); totals.push(hs + as); n++;
+
+      // Points for and against, by team, so totals get a model too.
+      const yr = Number((ev.date || "").slice(0, 4)) || 0;
+      const note = (ab, pf, pa) => {
+        if (!ab) return;
+        if (!team[ab]) team[ab] = { g: 0, pf: 0, pa: 0, last: 0 };
+        team[ab].g++; team[ab].pf += pf; team[ab].pa += pa;
+        team[ab].last = Math.max(team[ab].last, yr);
+      };
+      note((H.team || {}).abbreviation, hs, as);
+      note((A.team || {}).abbreviation, as, hs);
     }
     return n;
   };
@@ -607,8 +619,12 @@ async function calibrate(years, onProgress) {
     .map((k) => ({ k, pct: freq(k) * 100, mult: table[k] }))
     .sort((a, b) => b.pct - a.pct);
 
+  const teams = {};
+  for (const [k, t] of Object.entries(team)) if (t.g >= 6) teams[k] = t;
+
   return { mult: table, n, years, marginSd: sd, totalMean: tMean, totalSd: tSd,
-           top, counts, perSeason: Math.round(n / years.length), at: Date.now() };
+           top, counts, teams, lgPts: tMean / 2,
+           perSeason: Math.round(n / years.length), at: Date.now() };
 }
 
 const phi = (z) => Math.exp(-0.5 * z * z);
@@ -784,6 +800,7 @@ const CSS = `
   font-family:'Oswald',sans-serif; font-weight:500; text-transform:uppercase; font-size:12.5px;
   letter-spacing:.06em; padding:8px 16px; border-radius:2px; cursor:pointer; }
 .tabs button[data-on="1"] { background:var(--fg); color:var(--bg); border-color:var(--fg); }
+.tabs .gear { margin-left:auto; padding:8px 12px; font-size:14px; }
 .tabs button:focus-visible, .seg button:focus-visible, .gm:focus-visible { outline:2px solid var(--turf); outline-offset:2px; }
 
 .gm { width:100%; text-align:left; background:var(--card); border:0; border-left:4px solid;
@@ -903,6 +920,14 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .why li::before { content:''; position:absolute; left:0; top:10px; width:4px; height:4px;
   border-radius:50%; background:var(--turf); }
 .why b { color:var(--turf); }
+.tier { font-family:'Oswald',sans-serif; font-size:11px; text-transform:uppercase;
+  letter-spacing:.09em; color:var(--dim); margin:20px 0 8px; }
+.tier.amber { color:#E3B448; }
+.playcard.lean { border-left-color:#E3B448; background:var(--bg); }
+.playcard.lean .why b { color:#E3B448; }
+.shortfall { margin:0 0 8px; font-size:12px; line-height:1.5; color:#E3B448; }
+.tag-ml { font-size:11px; letter-spacing:.08em; color:var(--bg); background:var(--turf);
+  padding:2px 5px; border-radius:2px; vertical-align:3px; }
 .bars { display:flex; align-items:flex-end; gap:2px; height:90px; margin-top:10px; }
 .bar { flex:1; background:var(--edge); border-radius:1px 1px 0 0; min-height:2px; }
 .bar.key { background:#E3B448; }
@@ -1192,19 +1217,161 @@ function assess(game, sum) {
   if (ev < 0.02)
     fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
 
-  return { game, res, gap, sideHome, best, L, ev, pModel, hp, onKey, fail,
+  return { kind: "spread", game, res, gap, sideHome, best, L, ev, pModel, hp, onKey, fail,
            side: sideHome ? game.home : game.away,
+           price: price,
            score: ev * Math.min(1, res.count / 4) * (onKey ? 0.7 : 1) };
 }
 
+/* The same margin model prices a moneyline for free — no extra assumption,
+   just P(win) instead of P(cover). Dog moneylines drift from the spread
+   often enough to be worth checking separately. */
+/* Projected total from scoring rates, regressed hard toward the league mean
+   because a handful of games says very little. Null when there's no
+   calibration to build on — no model, no pick. */
+function projectTotal(hAb, aAb) {
+  if (!EMP || !EMP.teams || !EMP.lgPts) return null;
+  const H = EMP.teams[hAb], A = EMP.teams[aAb];
+  if (!H || !A) return null;
+  const L = EMP.lgPts;
+  const reg = (rate, g) => (rate * g + L * 8) / (g + 8);   // 8 games of prior
+  const hOff = reg(H.pf / H.g, H.g), hDef = reg(H.pa / H.g, H.g);
+  const aOff = reg(A.pf / A.g, A.g), aDef = reg(A.pa / A.g, A.g);
+  return { total: (hOff + aDef - L) + (aOff + hDef - L),
+           games: Math.min(H.g, A.g) };
+}
+
+function assessTotal(game, sum) {
+  if (!sum || !sum.pick) return null;
+  const rows = {};
+  for (const b of sum.pick) {
+    if (b.tot != null)
+      rows[b.k] = { l: String(b.tot), a: String(b.ovr ?? -110), b: String(b.und ?? -110) };
+  }
+  const res = shop("tot", game, rows, devigPower);
+  if (!res) return null;
+
+  const proj = projectTotal(game.hAb, game.aAb);
+  if (!proj) return null;                     // no scoring model, no opinion
+
+  const fail = [];
+  if (res.count < 3) fail.push(`only ${res.count} book${res.count === 1 ? "" : "s"} priced it`);
+
+  const gap = proj.total - res.cons;
+  const over = gap > 0;
+  const best = over ? res.bestA : res.bestB;
+  const line = best.L;
+  const pOver = 1 - normCdf((line - proj.total) / SIG_T);
+  const pModel = over ? pOver : 1 - pOver;
+  const price = parseFloat(over ? best.oa : best.ob);
+  const w = payout(price);
+  if (w == null) return null;
+  const ev = pModel * w - (1 - pModel);
+
+  // Scoring rates on a handful of games are noise. Strictest gate in the app.
+  if (proj.games < 6) fail.push(`only ${proj.games} games of scoring on these teams`);
+  if (Math.abs(gap) < 3.5)
+    fail.push(`projection is ${Math.abs(gap).toFixed(1)} points off the total, under the 3.5 required`);
+  if (ev < 0.02)
+    fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
+
+  return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail,
+           games: proj.games, proj: proj.total,
+           side: over ? `Over ${trim(line)}` : `Under ${trim(line)}`,
+           score: ev * Math.min(1, res.count / 4) * 0.7 };
+}
+
+function assessML(game, sum) {
+  if (!sum || !sum.pick) return null;
+  const rows = {};
+  for (const b of sum.pick) {
+    if (b.mlA != null && b.mlB != null) rows[b.k] = { a: String(b.mlA), b: String(b.mlB) };
+  }
+  const res = shop("ml", game, rows, devigPower);
+  if (!res) return null;
+  const modelMu = sum.espnWp != null ? -modelLine(sum.espnWp) : null;
+  if (modelMu == null) return null;
+
+  // P(home wins outright) straight off the same distribution.
+  const c = coverProb(modelMu, 0, SIG_M);
+  const pHome = c.win + c.push / 2;
+
+  const fail = [];
+  if (res.count < 3) fail.push(`only ${res.count} book${res.count === 1 ? "" : "s"} priced it`);
+
+  const sideHome = pHome > res.cons;                 // model likes home more than market does
+  const pModel = sideHome ? pHome : 1 - pHome;
+  const best = sideHome ? res.bestB : res.bestA;
+  const price = parseFloat(sideHome ? best.ob : best.oa);
+  const w = payout(price);
+  if (w == null) return null;
+  const ev = pModel * w - (1 - pModel);
+  const edge = Math.abs(pHome - res.cons);
+
+  // Past about +500 the model's tail is doing more work than the data
+  // supports, and a small probability error swamps the price.
+  if (price > 500) fail.push(`priced at ${fmtOdds(price)}, past where this model is trustworthy`);
+  if (edge < 0.04) fail.push(`only ${(edge * 100).toFixed(1)} points of win probability between model and market`);
+  if (ev < 0.02) fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
+
+  return { kind: "moneyline", game, res, ev, pModel, edge, best, price, fail,
+           sideHome, side: sideHome ? game.home : game.away,
+           score: ev * Math.min(1, res.count / 4) * 0.85 };
+}
+
 function CardTab({ board, boardOdds, entries, onOpen }) {
-  const cands = board
-    .map((g) => assess(g, (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum))
-    .filter(Boolean);
-  const passed = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
-  const near = cands.filter((c) => c.fail.length === 1)
-    .sort((a, b) => Math.abs(b.gap) - Math.abs(a.gap)).slice(0, 4);
+  const cands = board.flatMap((g) => {
+    const sum = (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum;
+    return [assess(g, sum), assessML(g, sum), assessTotal(g, sum)].filter(Boolean);
+  });
   const swept = Object.keys(boardOdds).length > 0;
+
+  // Rank everything, then tier it. A weak spot still gets shown — it just
+  // never gets called a play.
+  const byQuality = (a, b) => (b.ev || -1) - (a.ev || -1);
+  const plays = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
+  const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality).slice(0, 5);
+  const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality).slice(0, 5);
+
+  const headline = (c) => (
+    <span className="pside" style={{
+      color: c.kind === "total" ? "#F2F5FA" : tc(c.game, c.sideHome ? "h" : "a") }}>
+      {c.side}{" "}
+      {c.kind === "spread"
+        ? <>{c.L > 0 ? "+" : "−"}{trim(Math.abs(c.L))} </>
+        : c.kind === "moneyline" ? <span className="tag-ml">ML</span> : null}{" "}
+      <span className="pprice">{fmtOdds(c.price)}</span>
+    </span>
+  );
+
+  const reasons = (c) => (
+    <ul className="why">
+      {c.kind === "total" ? (
+        <>
+          <li>Scoring rates project {c.proj.toFixed(1)}, {Math.abs(c.gap).toFixed(1)} points
+              {c.over ? " above" : " below"} the market's {trim(c.res.cons)} across {c.res.count} books.</li>
+          <li>Lands this side {(c.pModel * 100).toFixed(0)}% of the time if that holds —
+              <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at {fmtOdds(c.price)}.</li>
+          <li>Built on {c.games} games of scoring for the thinner of the two teams.</li>
+        </>
+      ) : c.kind === "spread" ? (
+        <>
+          <li>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market across {c.res.count} books.</li>
+          <li>Covers {(c.pModel * 100).toFixed(0)}% of the time if that projection is right —
+              <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at this price.</li>
+          <li>Half a point here is worth {(c.hp * 100).toFixed(1)}%
+              {c.onKey ? " — and it's on a key number" : ""}.</li>
+        </>
+      ) : (
+        <>
+          <li>Model has this side winning {(c.pModel * 100).toFixed(0)}% outright, {(c.edge * 100).toFixed(1)}
+              points above the market across {c.res.count} books.</li>
+          <li>At {fmtOdds(c.price)} that's <b>{c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> if the projection holds.</li>
+          <li>Straight win-loss — no key number, no push.</li>
+        </>
+      )}
+    </ul>
+  );
 
   return (
     <>
@@ -1215,61 +1382,78 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
         </div>
       )}
 
-      {swept && passed.length === 0 && (
-        <div className="stale" style={{ borderLeftColor: "#35D07F" }}>
-          <b>No plays on this card.</b> {cands.length} games had enough of a market to judge and
-          none cleared the bar. That's the normal result, not a failure — most Saturdays the
-          honest answer is that the number is the number.
+      {swept && (
+        <div className="stale" style={{ borderLeftColor: plays.length ? "#35D07F" : "#7E8899" }}>
+          {cands.length} spots judged across {board.length} games.{" "}
+          {plays.length
+            ? <><b>{plays.length} cleared the bar.</b> Everything below that is ranked but didn't, and says why.</>
+            : <><b>Nothing cleared the bar today.</b> The leans below are the best available anyway — they're
+              ranked honestly, not promoted. On a day like this the disciplined move is a smaller stake
+              or none at all.</>}
         </div>
       )}
 
-      {passed.map((c, i) => (
-        <div className="playcard" key={c.game.id} onClick={() => onOpen(c.game.id)}>
+      {plays.length > 0 && <p className="tier">Plays · cleared every test</p>}
+      {plays.map((c, i) => (
+        <div className="playcard" key={c.kind + c.game.id} onClick={() => onOpen(c.game.id)}>
           <span className="pnum">{i + 1}</span>
           <div className="pbody">
-            <span className="pside" style={{ color: tc(c.game, c.sideHome ? "h" : "a") }}>
-              {c.side} {c.L > 0 ? "+" : "−"}{trim(Math.abs(c.L))}{" "}
-              <span className="pprice">{fmtOdds(parseFloat(c.sideHome ? c.best.ob : c.best.oa))}</span>
-            </span>
+            {headline(c)}
             <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
-            <ul className="why">
-              <li>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market across {c.res.count} books.</li>
-              <li>Covers {(c.pModel * 100).toFixed(0)}% of the time if that projection is right,
-                  which at this price is <b>+{(c.ev * 100).toFixed(1)}%</b>.</li>
-              <li>Half a point here is worth {(c.hp * 100).toFixed(1)}%
-                  {c.onKey ? " — and it's on a key number, so this had to clear a higher bar" : ""}.</li>
-            </ul>
+            {reasons(c)}
           </div>
         </div>
       ))}
 
-      {swept && near.length > 0 && (
+      {leans.length > 0 && (
         <>
-          <p className="empty" style={{ paddingTop: 18 }}>
-            <b style={{ color: "#F2F5FA" }}>Missed by one thing.</b> Shown so you can see what the
-            bar rejects, not as picks.
-          </p>
-          {near.map((c) => (
-            <div className="gm" key={c.game.id} style={{ borderLeftColor: tc(c.game, "h") }}
+          <p className="tier amber">Leans · best available, but each falls short on one thing</p>
+          {leans.map((c) => (
+            <div className="playcard lean" key={c.kind + c.game.id} onClick={() => onOpen(c.game.id)}>
+              <div className="pbody">
+                {headline(c)}
+                <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
+                <p className="shortfall">Falls short: {c.fail[0]}.</p>
+                {reasons(c)}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
+
+      {watch.length > 0 && (
+        <>
+          <p className="tier">Watching · more than one thing wrong</p>
+          {watch.map((c) => (
+            <div className="gm" key={c.kind + c.game.id} style={{ borderLeftColor: tc(c.game, "h") }}
               onClick={() => onOpen(c.game.id)}>
               <span className="who">
                 <span className="abbr">
                   <span style={{ color: tc(c.game, "a") }}>{c.game.aAb}</span><i>at</i>
                   <span style={{ color: tc(c.game, "h") }}>{c.game.hAb}</span>
                 </span>
-                <span className="meta">{c.side} — {c.fail[0]}</span>
+                <span className="meta">{c.side} — {c.fail.join("; ")}</span>
               </span>
             </div>
           ))}
         </>
       )}
 
+      {swept && !(EMP && EMP.teams) && (
+        <p className="empty">
+          <b style={{ color: "#E3B448" }}>Totals aren't being judged.</b> Over/under needs a scoring
+          model and there isn't one until you calibrate — the settings tab builds it from real results
+          at the same time it measures the key numbers.
+        </p>
+      )}
+
       {swept && (
         <p className="empty">
-          Every number here assumes ESPN's projection is right, and that's one model with no
-          second opinion behind it. Clearing this bar means the model and the market disagree
-          by more than the market disagrees with itself — not that the game is won. Nothing on
-          this card is priced against a sharp book, because ESPN's feed carries retail ones.
+          Spread and moneyline numbers assume ESPN's projection is right; totals assume the scoring
+          model is. Both are single models with no second opinion behind them. A play clearing the
+          bar means the model and the market disagree by more than the market disagrees with itself
+          — not that the game is won. Leans are shown because an empty screen isn't useful, not
+          because they're worth the same stake.
         </p>
       )}
     </>
@@ -1992,13 +2176,12 @@ function LineDesk() {
               onClick={() => { setTab("live"); setOpen(null); }}>
               Live{inPlay.length > 0 ? ` (${inPlay.length})` : ""}
             </button>
-            <button data-on={tab === "top25" ? "1" : "0"}
-              onClick={() => { setTab("top25"); setOpen(null); }}>Top 25</button>
             <button data-on={tab === "card" ? "1" : "0"}
               onClick={() => { setTab("card"); setOpen(null); }}>Card</button>
-            <button data-on={tab === "model" ? "1" : "0"}
-              onClick={() => { setTab("model"); setOpen(null); }}>
-              Model{emp ? " ✓" : ""}
+            <button className="gear" aria-label="Settings"
+              data-on={tab === "top25" || tab === "model" ? "1" : "0"}
+              onClick={() => { setTab(tab === "model" ? "upcoming" : "model"); setOpen(null); }}>
+              ⚙{emp ? "" : " !"}
             </button>
           </div>
         </header>
@@ -2232,12 +2415,20 @@ function LineDesk() {
           </>
         )}
 
-        {tab === "top25" && <Top25 />}
         {tab === "card" && (
           <CardTab board={board} boardOdds={boardOdds} entries={entries}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
         )}
-        {tab === "model" && <ModelTab emp={emp} setEmp={setEmp} />}
+        {(tab === "model" || tab === "top25") && (
+          <>
+            <div style={{ padding: "4px 0 14px" }}>
+              <Seg value={tab} onChange={setTab} options={[
+                { v: "model", l: "Model" }, { v: "top25", l: "Top 25" }]} />
+            </div>
+            {tab === "model" && <ModelTab emp={emp} setEmp={setEmp} />}
+            {tab === "top25" && <Top25 />}
+          </>
+        )}
 
         <div className="ft">
           <p>Expected value is measured against the other books loaded for that game — Pinnacle
