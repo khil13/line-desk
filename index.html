@@ -945,7 +945,12 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .fl .sep { color:var(--edge); font-weight:400; }
 .sweepbar { margin-bottom:12px; }
 .playcard { display:flex; gap:12px; background:var(--card); border-left:4px solid var(--turf);
-  border-radius:0 3px 3px 0; padding:14px; margin-bottom:8px; cursor:pointer; }
+  border-radius:0 3px 3px 0; padding:14px; margin-bottom:8px; }
+.opengame { display:inline-block; margin-top:11px; background:none; border:1px solid var(--edge);
+  color:var(--dim); font-family:'Oswald',sans-serif; font-size:10.5px; text-transform:uppercase;
+  letter-spacing:.07em; padding:7px 11px; border-radius:2px; cursor:pointer; }
+.opengame:hover { color:var(--fg); border-color:var(--dim); }
+.opengame:focus-visible { outline:2px solid var(--turf); outline-offset:2px; }
 .pnum { font-family:'Oswald',sans-serif; font-weight:700; font-size:24px; color:var(--turf);
   line-height:1; flex-shrink:0; }
 .pbody { min-width:0; flex:1; }
@@ -1266,6 +1271,9 @@ function assess(game, sum) {
   const hp = halfPointValue(res.cons, best.L, SIG_M);
   const onKey = [3, 7, 10, 14, 17].some((k) => Math.abs(Math.abs(best.L) - k) < 0.01);
 
+  if (Math.abs(res.cons) >= 21 || Math.abs(modelMu) >= 21)
+    fail.push(`line is past 21 points, where turning a win probability into a spread drifts by several points on its own`);
+
   const need = 2.5 + (onKey ? 1.5 : 0);
   if (Math.abs(gap) < need)
     fail.push(`gap of ${Math.abs(gap).toFixed(1)} is under the ${need.toFixed(1)} required${onKey ? " on a key number" : ""}`);
@@ -1332,6 +1340,7 @@ function assessTotal(game, sum) {
 
   return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail,
            games: proj.games, proj: proj.total,
+           seasons: EMP && EMP.years ? EMP.years.join(", ") : null,
            side: over ? `Over ${trim(line)}` : `Under ${trim(line)}`,
            score: ev * Math.min(1, res.count / 4) * 0.7 };
 }
@@ -1366,6 +1375,8 @@ function assessML(game, sum) {
   // Past about +500 the model's tail is doing more work than the data
   // supports, and a small probability error swamps the price.
   if (price > 500) fail.push(`priced at ${fmtOdds(price)}, past where this model is trustworthy`);
+  if (Math.abs(modelMu) >= 21)
+    fail.push(`a ${trim(Math.abs(modelMu))}-point projection is past where this model holds up`);
   if (edge < 0.04) fail.push(`only ${(edge * 100).toFixed(1)} points of win probability between model and market`);
   if (ev < 0.02) fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
 
@@ -1441,6 +1452,7 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
   // Rank everything, then tier it. A weak spot still gets shown — it just
   // never gets called a play.
   const byQuality = (a, b) => (b.ev || -1) - (a.ev || -1);
+  const oneBook = cands.filter((c) => c.res && c.res.count === 1).length;
   const plays = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
   const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality).slice(0, 5);
   const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality).slice(0, 5);
@@ -1461,14 +1473,18 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
       {c.kind === "total" ? (
         <>
           <li>Scoring rates project {c.proj.toFixed(1)}, {Math.abs(c.gap).toFixed(1)} points
-              {c.over ? " above" : " below"} the market's {trim(c.res.cons)} across {c.res.count} books.</li>
+              {c.over ? " above" : " below"} the market's {trim(c.res.cons)} across {c.res.count}
+              {c.res.count === 1 ? " book" : " books"}.</li>
           <li>Lands this side {(c.pModel * 100).toFixed(0)}% of the time if that holds —
               <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at {fmtOdds(c.price)}.</li>
-          <li>Built on {c.games} games of scoring for the thinner of the two teams.</li>
+          <li>Built on {c.games} games of scoring for the thinner of the two teams
+              {c.seasons ? `, drawn from ${c.seasons}` : ""} — mostly prior seasons this early,
+              which is a real weakness.</li>
         </>
       ) : c.kind === "spread" ? (
         <>
-          <li>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market across {c.res.count} books.</li>
+          <li>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market
+              across {c.res.count} {c.res.count === 1 ? "book" : "books"}.</li>
           <li>Covers {(c.pModel * 100).toFixed(0)}% of the time if that projection is right —
               <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at this price.</li>
           <li>Half a point here is worth {(c.hp * 100).toFixed(1)}%
@@ -1477,7 +1493,7 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
       ) : (
         <>
           <li>Model has this side winning {(c.pModel * 100).toFixed(0)}% outright, {(c.edge * 100).toFixed(1)}
-              points above the market across {c.res.count} books.</li>
+              points above the market across {c.res.count} {c.res.count === 1 ? "book" : "books"}.</li>
           <li>At {fmtOdds(c.price)} that's <b>{c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> if the projection holds.</li>
           <li>Straight win-loss — no key number, no push.</li>
         </>
@@ -1497,6 +1513,11 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
       {swept && (
         <div className="stale" style={{ borderLeftColor: plays.length ? "#35D07F" : "#7E8899" }}>
           {cands.length} spots judged across {board.length} games.{" "}
+          {oneBook > cands.length * 0.6 && (
+            <> <b style={{ color: "#E3B448" }}>Most of these have a single book.</b> ESPN's feed
+            carries one price on small games, and one price isn't a market — that's what's thinning
+            this card, not the thresholds.</>
+          )}{" "}
           {plays.length
             ? <><b>{plays.length} cleared the bar.</b> Everything below that is ranked but didn't, and says why.</>
             : <><b>Nothing cleared the bar today.</b> The leans below are the best available anyway — they're
@@ -1505,14 +1526,26 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
         </div>
       )}
 
+      {swept && !(EMP && EMP.teams) && (
+        <div className="stale" style={{ borderLeftColor: "#E3B448" }}>
+          <b>No totals on this card, and that's fixable.</b> Over/under needs a scoring model, and
+          yours predates it — the calibration that built your key numbers didn't collect points for
+          and against. Re-run it on the ⚙ tab and every total on the board becomes judgeable.
+          Spreads and moneylines are unaffected.
+        </div>
+      )}
+
       {plays.length > 0 && <p className="tier">Plays · cleared every test</p>}
       {plays.map((c, i) => (
-        <div className="playcard" key={c.kind + c.game.id} onClick={() => onOpen(c.game.id)}>
+        <div className="playcard" key={c.kind + c.game.id}>
           <span className="pnum">{i + 1}</span>
           <div className="pbody">
             {headline(c)}
             <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
             {reasons(c)}
+            <button className="opengame" onClick={() => onOpen(c.game.id)}>
+              Open the full game →
+            </button>
           </div>
         </div>
       ))}
@@ -1521,12 +1554,15 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
         <>
           <p className="tier amber">Leans · best available, but each falls short on one thing</p>
           {leans.map((c) => (
-            <div className="playcard lean" key={c.kind + c.game.id} onClick={() => onOpen(c.game.id)}>
+            <div className="playcard lean" key={c.kind + c.game.id}>
               <div className="pbody">
                 {headline(c)}
                 <span className="pbook">{c.best.bk.n} · {c.game.away} at {c.game.home}</span>
                 <p className="shortfall">Falls short: {c.fail[0]}.</p>
                 {reasons(c)}
+                <button className="opengame" onClick={() => onOpen(c.game.id)}>
+                  Open the full game →
+                </button>
               </div>
             </div>
           ))}
@@ -1537,8 +1573,8 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
         <>
           <p className="tier">Watching · more than one thing wrong</p>
           {watch.map((c) => (
-            <div className="gm" key={c.kind + c.game.id} style={{ borderLeftColor: tc(c.game, "h") }}
-              onClick={() => onOpen(c.game.id)}>
+            <div className="gm" key={c.kind + c.game.id}
+              style={{ borderLeftColor: tc(c.game, "h"), cursor: "default" }}>
               <span className="who">
                 <span className="abbr">
                   <span style={{ color: tc(c.game, "a") }}>{c.game.aAb}</span><i>at</i>
@@ -1549,14 +1585,6 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
             </div>
           ))}
         </>
-      )}
-
-      {swept && !(EMP && EMP.teams) && (
-        <p className="empty">
-          <b style={{ color: "#E3B448" }}>Totals aren't being judged.</b> Over/under needs a scoring
-          model and there isn't one until you calibrate — the settings tab builds it from real results
-          at the same time it measures the key numbers.
-        </p>
       )}
 
       {swept && (
