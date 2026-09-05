@@ -101,6 +101,26 @@ const legible = (hex) => {
   return "#" + to(cv(hh + 1 / 3)) + to(cv(hh)) + to(cv(hh - 1 / 3));
 };
 
+/* The football week around whatever today is. Hardcoding these once pinned
+   the whole app to the week it was built in. */
+const dayKey = (d) =>
+  d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") +
+  String(d.getDate()).padStart(2, "0");
+
+const footballWeek = (now) => {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  const dow = d.getDay();                       // 0 Sun … 6 Sat
+  const sat = new Date(d);
+  // Sunday belongs to the Saturday just gone, not the one coming.
+  sat.setDate(d.getDate() + (dow === 0 ? -1 : (6 - dow)));
+  const names = ["Thu", "Fri", "Sat", "Sun"];
+  return [-2, -1, 0, 1].map((off, i) => {
+    const x = new Date(sat); x.setDate(sat.getDate() + off);
+    return { v: dayKey(x), l: names[i] + " " + x.getDate(), iso: x };
+  });
+};
+
 const fmtKick = (iso) => {
   try {
     return new Date(iso).toLocaleString([], {
@@ -1383,7 +1403,12 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
     runSweep();
   }, [day, swept, sweeping]);
 
-  const cands = board.flatMap((g) => {
+  // Never recommend a game that has already kicked off, let alone finished.
+  const upcoming = board.filter((g) =>
+    g.state ? g.state === "pre" : !(g.hs != null && g.as != null));
+  const done = board.length - upcoming.length;
+
+  const cands = upcoming.flatMap((g) => {
     const sum = (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum;
     return [assess(g, sum), assessML(g, sum), assessTotal(g, sum)].filter(Boolean);
   });
@@ -1461,7 +1486,8 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <div className="stale" style={{ borderLeftColor: plays.length ? "#35D07F" : "#7E8899" }}>
-          {cands.length} spots judged across {board.length} games.{" "}
+          {cands.length} spots judged across {upcoming.length} games still to kick off
+          {done > 0 ? `, ${done} already under way and excluded` : ""}.{" "}
           {plays.length < 6 && oneBook > cands.length * 0.6 && (
             <> <b style={{ color: "#E3B448" }}>Most of these rest on a single book.</b> ESPN's feed
             carries one price on small games, so those picks can't be cross-checked and have to
@@ -2151,7 +2177,12 @@ export default function LineDesk() {
   const [todayAt, setTodayAt] = useState(null);
   const [espnAt, setEspnAt] = useState(null);
   const [espnErr, setEspnErr] = useState(null);
-  const [day, setDay] = useState("20260903");
+  // Default to today when today is part of the week, otherwise Saturday.
+  const [day, setDay] = useState(() => {
+    const wk = footballWeek(new Date());
+    const today = dayKey(new Date());
+    return wk.some((w) => w.v === today) ? today : wk[2].v;
+  });
   const loading = React.useRef(false);
 
   const loadBoard = async (d) => {
@@ -2251,6 +2282,8 @@ export default function LineDesk() {
     setSweeping(false);
   };
 
+  const week = footballWeek(now);
+
   const shown = (() => {
     let list = board.slice();
     if (onlyMkt) list = list.filter((g) => boardOdds[g.id] && boardOdds[g.id].n > 0);
@@ -2330,9 +2363,7 @@ export default function LineDesk() {
             </div>
 
             <div style={{ padding: "4px 0 12px" }}>
-              <Seg value={day} onChange={setDay} options={[
-                { v: "20260903", l: "Thu" }, { v: "20260904", l: "Fri" },
-                { v: "20260905", l: "Sat" }, { v: "20260906", l: "Sun" }]} />
+              <Seg value={day} onChange={setDay} options={week} />
             </div>
             <div className="sweepbar">
               <button className="pull" style={{ marginTop: 0 }} disabled={sweeping}
