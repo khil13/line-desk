@@ -140,6 +140,19 @@ const parseBoard = (j) =>
       as: A.score != null && A.score !== "" ? Number(A.score) : null,
       state: st.state || "pre",
       detail: st.shortDetail || "",
+      hId: (H.team || {}).id || null,
+      aId: (A.team || {}).id || null,
+      sit: (() => {
+        const q = c.situation;
+        if (!q) return null;
+        return {
+          poss: q.possession || null,
+          down: q.downDistanceText || q.shortDownDistanceText || null,
+          spot: q.possessionText || null,
+          red: !!q.isRedZone,
+          last: (q.lastPlay || {}).text || null,
+        };
+      })(),
       venue: (c.venue || {}).fullName || null,
       wp: null,
       espnOdds: od
@@ -241,6 +254,31 @@ const parseSummary = (j, hAb, aAb) => {
     attendance: gi.attendance || null,
     series: (((j.seasonseries || [])[0] || {}).summary) || null,
   };
+};
+
+const STATKEYS = [
+  ["totalYards", "Total yards"], ["netPassingYards", "Passing"],
+  ["rushingYards", "Rushing"], ["firstDowns", "First downs"],
+  ["thirdDownEff", "Third down"], ["turnovers", "Turnovers"],
+  ["possessionTime", "Possession"], ["totalPenaltiesYards", "Penalties"],
+];
+
+const parseLive = (j, hId, aId) => {
+  const teams = ((j.boxscore || {}).teams) || [];
+  if (!teams.length) return null;
+  const pick = (t) => {
+    const out = {};
+    for (const st of t.statistics || []) out[st.name] = st.displayValue;
+    return out;
+  };
+  const H = teams.find((t) => String((t.team || {}).id) === String(hId));
+  const A = teams.find((t) => String((t.team || {}).id) === String(aId));
+  if (!H || !A) return null;
+  const wp = j.winprobability;
+  const lastWp = Array.isArray(wp) && wp.length
+    ? wp[wp.length - 1].homeWinPercentage : null;
+  return { h: pick(H), a: pick(A),
+           wp: lastWp != null ? lastWp * 100 : null };
 };
 
 const parseRanks = (j) => {
@@ -807,6 +845,23 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .why li::before { content:''; position:absolute; left:0; top:10px; width:4px; height:4px;
   border-radius:50%; background:var(--turf); }
 .why b { color:var(--turf); }
+.livebox { background:var(--bg); border-radius:0 0 3px 3px; padding:12px 14px; margin:-3px 0 3px; }
+.wpbar { position:relative; height:22px; background:var(--edge); border-radius:2px;
+  overflow:hidden; margin-bottom:12px; }
+.wpfill { position:absolute; right:0; top:0; bottom:0; }
+.wplab { position:absolute; top:4px; font-family:'Oswald',sans-serif; font-size:11px;
+  font-weight:600; letter-spacing:.04em; text-shadow:0 1px 2px rgba(0,0,0,.7); }
+.wplab.l { left:8px; } .wplab.r { right:8px; }
+.box { width:100%; border-collapse:collapse; }
+.box td { padding:5px 0; font-size:12.5px; border-bottom:1px solid var(--edge); }
+.box tr:last-child td { border-bottom:0; }
+.bv { font-family:'Oswald',sans-serif; font-weight:600; font-size:14px; width:32%; }
+.bv.r { text-align:right; }
+.bl { text-align:center; color:var(--dim); font-size:10.5px; text-transform:uppercase;
+  letter-spacing:.05em; }
+.sitline { display:block; font-size:11.5px; color:#E3B448; margin-top:4px; line-height:1.4; }
+.sitline .red { color:#FF5A47; font-weight:600; }
+.pball { color:var(--turf); font-weight:700; }
 .tier { font-family:'Oswald',sans-serif; font-size:11px; text-transform:uppercase;
   letter-spacing:.09em; color:var(--dim); margin:20px 0 8px; }
 .tier.amber { color:#E3B448; }
@@ -1204,6 +1259,63 @@ function assessML(game, sum) {
   return { kind: "moneyline", game, res, ev, pModel, edge, best, price, fail,
            sideHome, side: sideHome ? game.home : game.away,
            score: ev * Math.min(1, res.count / 4) * 0.85 };
+}
+
+/* Expandable live detail: box score and win probability, refreshed on the
+   same cadence as the scoreboard. */
+function LiveGame({ game, live }) {
+  const [box, setBox] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    if (!game.espnId) return;
+    setBusy(true);
+    try {
+      setBox(parseLive(await espnGet("/summary?event=" + game.espnId), game.hId, game.aId));
+    } catch (e) { /* the score line still stands on its own */ }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => {
+    load();
+    if (!live) return;
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, [game.espnId, live]);
+
+  if (busy && !box) return <p className="empty" style={{ padding: "10px 14px" }}>Loading the box score…</p>;
+  if (!box) return null;
+
+  const rows = STATKEYS.filter(([k]) => box.h[k] != null || box.a[k] != null);
+  return (
+    <div className="livebox">
+      {box.wp != null && (
+        <div className="wpbar">
+          <div className="wpfill" style={{ width: box.wp + "%", background: tc(game, "h") }} />
+          <span className="wplab l" style={{ color: tc(game, "a") }}>
+            {game.aAb} {(100 - box.wp).toFixed(0)}%
+          </span>
+          <span className="wplab r" style={{ color: tc(game, "h") }}>
+            {game.hAb} {box.wp.toFixed(0)}%
+          </span>
+        </div>
+      )}
+      <table className="box">
+        <tbody>
+          {rows.map(([k, label]) => (
+            <tr key={k}>
+              <td className="bv" style={{ color: tc(game, "a") }}>{box.a[k] || "—"}</td>
+              <td className="bl">{label}</td>
+              <td className="bv r" style={{ color: tc(game, "h") }}>{box.h[k] || "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="empty" style={{ padding: "8px 0 0" }}>
+        Win probability is ESPN's, computed from the game state — not from any betting line.
+      </p>
+    </div>
+  );
 }
 
 function CardTab({ board, boardOdds, entries, onOpen }) {
@@ -1919,6 +2031,7 @@ export default function LineDesk() {
   const [boardOdds, setBoardOdds] = useState({});
   const [sweeping, setSweeping] = useState(false);
   const [sweptDay, setSweptDay] = useState(null);
+  const [openLive, setOpenLive] = useState(null);
   const [sweepProg, setSweepProg] = useState([0, 0]);
   const [sort, setSort] = useState("time");
   const [onlyMkt, setOnlyMkt] = useState(false);
@@ -2264,36 +2377,55 @@ export default function LineDesk() {
             ) : (
               <>
                 <div className="stale" style={{ borderLeftColor: "#FF5A47" }}>
-                  Scores come straight from ESPN's scoreboard, refreshed every 30 seconds while
-                  games are running. Still a few seconds behind the broadcast, so{" "}
+                  Scores, possession, down and distance and the box score all come straight from
+                  ESPN, refreshed every 30 seconds while games are running. Still a few seconds behind the broadcast, so{" "}
                   <b>don't live bet off them</b> — anyone watching the feed sees the play first.
                   {espnAt && <> Updated {shortAge(Date.now() - espnAt)}.</>}
                 </div>
                 {inPlay.map((g) => {
                   const sc = g.hs != null && g.as != null ? g : null;
+                  const hasBall = g.sit && g.sit.poss
+                    ? (String(g.sit.poss) === String(g.hId) ? "h"
+                      : String(g.sit.poss) === String(g.aId) ? "a" : null)
+                    : null;
+                  const isOpen = openLive === g.id;
                   return (
-                    <div className="gm" key={g.id} style={{ borderLeftColor: col(g.hAb), cursor: "default" }}>
-                      <span className="who">
-                        <span className="abbr">
-                          <span style={{ color: col(g.aAb) }}>{g.aAb}</span>
-                          <i>at</i>
-                          <span style={{ color: col(g.hAb) }}>{g.hAb}</span>
-                        </span>
-                        <span className="meta">
-                          {sc ? <><span className="dot" /> {g.detail || "in progress"}</>
-                              : "waiting on a score"}
-                        </span>
-                      </span>
-                      <span className="rt">
-                        {sc ? (
-                          <span className="line">
-                            <span style={{ color: tc(g, "a") }}>{sc.as}</span>
-                            <span style={{ color: "#3B4453", margin: "0 5px" }}>·</span>
-                            <span style={{ color: tc(g, "h") }}>{sc.hs}</span>
+                    <div key={g.id}>
+                      <button className="gm" style={{ borderLeftColor: tc(g, "h") }}
+                        aria-expanded={isOpen}
+                        onClick={() => setOpenLive(isOpen ? null : g.id)}>
+                        <span className="who">
+                          <span className="abbr">
+                            {hasBall === "a" && <span className="pball">•</span>}
+                            <span style={{ color: tc(g, "a") }}>{g.aAb}</span>
+                            <i>at</i>
+                            {hasBall === "h" && <span className="pball">•</span>}
+                            <span style={{ color: tc(g, "h") }}>{g.hAb}</span>
                           </span>
-                        ) : <span className="line none">—</span>}
-                        <span className="sub">{g.kick}</span>
-                      </span>
+                          <span className="meta">
+                            {sc ? <><span className="dot" /> {g.detail || "in progress"}</>
+                                : "waiting on a score"}
+                          </span>
+                          {g.sit && (g.sit.down || g.sit.last) && (
+                            <span className="sitline">
+                              {g.sit.red && <span className="red">RED ZONE · </span>}
+                              {g.sit.down || ""}{g.sit.spot ? " · " + g.sit.spot : ""}
+                              {g.sit.last && <><br />{g.sit.last}</>}
+                            </span>
+                          )}
+                        </span>
+                        <span className="rt">
+                          {sc ? (
+                            <span className="line">
+                              <span style={{ color: tc(g, "a") }}>{sc.as}</span>
+                              <span style={{ color: "#3B4453", margin: "0 5px" }}>·</span>
+                              <span style={{ color: tc(g, "h") }}>{sc.hs}</span>
+                            </span>
+                          ) : <span className="line none">—</span>}
+                          <span className="sub">{isOpen ? "HIDE STATS" : "TAP FOR STATS"}</span>
+                        </span>
+                      </button>
+                      {isOpen && <LiveGame game={g} live={live} />}
                     </div>
                   );
                 })}
