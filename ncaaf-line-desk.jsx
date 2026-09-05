@@ -548,7 +548,7 @@ async function calibrate(years, onProgress) {
   for (const [k, t] of Object.entries(team)) if (t.g >= 6) teams[k] = t;
 
   return { mult: table, n, years, marginSd: sd, totalMean: tMean, totalSd: tSd,
-           top, counts, teams, lgPts: tMean / 2,
+           top, counts, teams, lgPts: tMean / 2, hfa: mean,
            perSeason: Math.round(n / years.length), at: Date.now() };
 }
 
@@ -1137,8 +1137,16 @@ function assess(game, sum) {
   const res = shop("sp", game, rows, devigPower);
   if (!res) return null;
 
-  const modelMu = sum.espnWp != null ? -modelLine(sum.espnWp) : null;
-  if (modelMu == null) return null;
+  const espnMu = sum.espnWp != null ? -modelLine(sum.espnWp) : null;
+  if (espnMu == null) return null;
+  const pw = projectMargin(game.hAb, game.aAb);
+  const powerMu = pw ? pw.mu : null;
+
+  // Two independent models are better evidence than one, so agreement earns a
+  // lower bar honestly. Disagreement between them kills the spot outright.
+  const both = powerMu != null;
+  const modelMu = both ? (espnMu + powerMu) / 2 : espnMu;
+  const band = both ? Math.abs(espnMu - powerMu) : null;
 
   const fail = [];
   // A single book's line is real, it just can't be cross-checked. Price that
@@ -1146,6 +1154,8 @@ function assess(game, sum) {
   const thin = res.count === 1 ? 1.5 : res.count === 2 ? 0.75 : 0;
 
   const gap = modelMu - res.cons;
+  if (both && Math.sign(espnMu - res.cons) !== Math.sign(powerMu - res.cons))
+    fail.push("the two models disagree on which side the market has wrong");
   const sideHome = gap > 0;
   const best = sideHome ? res.bestB : res.bestA;
   if (best.L == null) return null;
@@ -1167,18 +1177,21 @@ function assess(game, sum) {
   if (Math.abs(res.cons) >= 21 || Math.abs(modelMu) >= 21)
     fail.push(`line is past 21 points, where turning a win probability into a spread drifts by several points on its own`);
 
-  const need = 2.5 + (onKey ? 1.5 : 0) + thin;
+  // With two models the bar is how far apart they are; a tight pair earns a
+  // lower threshold. With one, it stays high.
+  const need = (both ? Math.max(band / 2, 1.5) : 3.0) + (onKey ? 1.5 : 0) + thin;
   if (Math.abs(gap) < need)
     fail.push(`gap of ${Math.abs(gap).toFixed(1)} is under the ${need.toFixed(1)} required${
-      onKey && thin ? " on a key number with this few books"
-      : onKey ? " on a key number"
-      : thin ? ` with only ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
+      both ? "" : " on one model alone"}${
+      onKey ? ", on a key number" : ""}${
+      thin ? `, with only ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
   if (ev < 0.02)
     fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
   if (ev > 0.25)
     fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — that size means the model is broken, not the book`);
 
   return { kind: "spread", game, res, gap, sideHome, best, L, ev, pModel, hp, onKey, fail,
+           espnMu, powerMu, band, both,
            books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            side: sideHome ? game.home : game.away,
            price: price,
@@ -1358,12 +1371,22 @@ function LiveGame({ game, live }) {
   );
 }
 
-function CardTab({ board, boardOdds, entries, onOpen }) {
+function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day }) {
+  const tried = React.useRef(null);
+  const swept = Object.keys(boardOdds).length > 0;
+
+  // The card is built from the board sweep, so it runs the sweep itself
+  // instead of sending you to another tab to do it by hand.
+  useEffect(() => {
+    if (swept || sweeping || tried.current === day) return;
+    tried.current = day;
+    runSweep();
+  }, [day, swept, sweeping]);
+
   const cands = board.flatMap((g) => {
     const sum = (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum;
     return [assess(g, sum), assessML(g, sum), assessTotal(g, sum)].filter(Boolean);
   });
-  const swept = Object.keys(boardOdds).length > 0;
 
   // Rank everything, then tier it. A weak spot still gets shown — it just
   // never gets called a play.
@@ -1400,8 +1423,12 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
         </>
       ) : c.kind === "spread" ? (
         <>
-          <li>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market
-              across {c.res.count} {c.res.count === 1 ? "book" : "books"}.</li>
+          <li>{c.both
+            ? <>Two models agree — ESPN at {trim(-c.espnMu)}, scoring ratings at {trim(-c.powerMu)},
+                {" "}{c.band.toFixed(1)} apart. Their average sits {Math.abs(c.gap).toFixed(1)} points
+                off the market across {c.res.count} {c.res.count === 1 ? "book" : "books"}.</>
+            : <>Projection sits {Math.abs(c.gap).toFixed(1)} points off the market across
+                {" "}{c.res.count} {c.res.count === 1 ? "book" : "books"}, on one model alone.</>}</li>
           <li>Covers {(c.pModel * 100).toFixed(0)}% of the time if that projection is right —
               <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at this price.</li>
           <li>Half a point here is worth {(c.hp * 100).toFixed(1)}%
@@ -1422,10 +1449,15 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
     <>
       {!swept && (
         <div className="stale">
-          Nothing to judge yet. Load the lines for the board on the <b>This week</b> tab first —
-          the card is built from those numbers, not a separate source.
+          {sweeping
+            ? <>Reading the board — game {prog[0]} of {prog[1]}. Every line comes from ESPN, so
+              this takes a minute and costs nothing.</>
+            : <>No prices came back for this day. Either the books haven't posted yet or ESPN's
+              feed is down.{" "}
+              <button className="relink" onClick={runSweep}>Try again</button></>}
         </div>
       )}
+      {!swept && sweeping && [...Array(3)].map((_, i) => <div className="skel" key={i} />)}
 
       {swept && (
         <div className="stale" style={{ borderLeftColor: plays.length ? "#35D07F" : "#7E8899" }}>
@@ -1519,7 +1551,11 @@ function CardTab({ board, boardOdds, entries, onOpen }) {
 
       {swept && (
         <p className="empty">
-          Totals are weighted 35% toward the model and 65% toward the market, because the price
+          Spreads run on two models where calibration allows it — ESPN's projection and a power
+          rating built from the scoring data. When they agree closely the required gap drops,
+          because two independent reads landing in the same place is stronger evidence than one;
+          when they disagree the spot is dropped entirely. Totals are weighted 35% toward the model
+          and 65% toward the market, because the price
           already contains injuries, pace and personnel that raw scoring averages don't. Any
           expected value above about 25% is rejected on sight — real edges are a few percent, and
           a number that large means the model broke, not the book. Spread and moneyline numbers
@@ -1625,7 +1661,9 @@ function ModelTab({ emp, setEmp }) {
             <p className="kb" style={{ marginTop: 6 }}>
               Margin standard deviation <b>{emp.marginSd.toFixed(1)}</b> · average total{" "}
               <b>{emp.totalMean.toFixed(1)}</b> · total standard deviation{" "}
-              <b>{emp.totalSd.toFixed(1)}</b>.
+              <b>{emp.totalSd.toFixed(1)}</b>
+              {emp.hfa != null && <> · home-field advantage <b>{emp.hfa.toFixed(1)}</b></>}
+              {emp.teams && <> · scoring ratings for <b>{Object.keys(emp.teams).length}</b> teams</>}.
             </p>
             <p className="kb dim">
               That margin figure is the spread of raw results, which is wider than the {SIG_M}
@@ -2190,6 +2228,29 @@ export default function LineDesk() {
   const pool = today.length ? today : board;
   const inPlay = pool.filter((g) =>
     g.state ? g.state === "in" : phaseOf(g.kickAt, now) === "live");
+  // One sweep, callable from the board or the card.
+  const runSweep = async () => {
+    if (sweeping || !board.length) return;
+    setSweeping(true); setSweepProg([0, board.length]);
+    const r = await sweepBoard(board, (a, b) => setSweepProg([a, b]));
+    setBoardOdds(r); setSweptDay(day);
+    // Seed each game panel so opening one is instant rather than re-fetching
+    // the summary the sweep already has.
+    setEntries((prev) => {
+      const next = { ...prev };
+      for (const id of Object.keys(r)) {
+        if (!r[id].sum) continue;
+        next[id] = { ...(next[id] || {}), sum: r[id].sum };
+      }
+      return next;
+    });
+    try {
+      await window.storage.set("linedesk:board",
+        JSON.stringify({ day, at: Date.now(), odds: r }));
+    } catch (e) { /* stays in memory */ }
+    setSweeping(false);
+  };
+
   const shown = (() => {
     let list = board.slice();
     if (onlyMkt) list = list.filter((g) => boardOdds[g.id] && boardOdds[g.id].n > 0);
@@ -2275,26 +2336,7 @@ export default function LineDesk() {
             </div>
             <div className="sweepbar">
               <button className="pull" style={{ marginTop: 0 }} disabled={sweeping}
-                onClick={async () => {
-                  setSweeping(true); setSweepProg([0, board.length]);
-                  const r = await sweepBoard(board, (a, b) => setSweepProg([a, b]));
-                  setBoardOdds(r); setSweptDay(day);
-                  // Seed each game panel so opening one is instant instead of
-                  // re-fetching the summary the sweep already has.
-                  setEntries((prev) => {
-                    const next = { ...prev };
-                    for (const id of Object.keys(r)) {
-                      if (!r[id].sum) continue;
-                      next[id] = { ...(next[id] || {}), sum: r[id].sum };
-                    }
-                    return next;
-                  });
-                  try {
-                    await window.storage.set("linedesk:board",
-                      JSON.stringify({ day, at: Date.now(), odds: r }));
-                  } catch (e) { /* stays in memory */ }
-                  setSweeping(false);
-                }}>
+                onClick={runSweep}>
                 {sweeping ? `Reading game ${sweepProg[0]} of ${sweepProg[1]}…`
                   : Object.keys(boardOdds).length
                     ? `${Object.keys(boardOdds).length} games priced · refresh`
@@ -2509,7 +2551,9 @@ export default function LineDesk() {
         )}
 
         {tab === "card" && (
-          <CardTab board={board} boardOdds={boardOdds} entries={entries}
+          <CardTab board={board} boardOdds={sweptDay === day ? boardOdds : {}}
+            entries={entries} sweeping={sweeping} prog={sweepProg}
+            runSweep={runSweep} day={day}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
         )}
         {(tab === "model" || tab === "top25") && (
