@@ -497,7 +497,7 @@ async function calibrate(years, onProgress) {
       note((H.team || {}).abbreviation, hs, as);
       note((A.team || {}).abbreviation, as, hs);
       const hAb = (H.team || {}).abbreviation, aAb = (A.team || {}).abbreviation;
-      if (hAb && aAb) glist.push([hAb, aAb, hs, as]);
+      if (hAb && aAb) glist.push([hAb, aAb, hs, as, yr]);
     }
     return n;
   };
@@ -569,7 +569,7 @@ async function calibrate(years, onProgress) {
 
   const teams = {};
   for (const [k, t] of Object.entries(team)) if (t.g >= 6) teams[k] = t;
-  const built = buildRatings(glist) || { rat: {}, lg: tMean / 2 };
+  const built = buildRatings(glist, seasonYear(new Date())) || { rat: {}, lg: tMean / 2 };
 
   return { mult: table, n, years, marginSd: sd, totalMean: tMean, totalSd: tSd,
            top, counts, teams, lgPts: tMean / 2, hfa: mean,
@@ -1264,26 +1264,39 @@ function assess(game, sum) {
    Margin ratings use the standard SRS fixed point: a team's rating is its
    average margin plus the average rating of everyone it played. Offence and
    defence are adjusted the same way against the units they actually faced. */
-function buildRatings(glist) {
+// A college season is named for the year it starts in.
+const seasonYear = (d) => (d.getMonth() >= 7 ? d.getFullYear() : d.getFullYear() - 1);
+const seasonsBack = (n, d) => {
+  const sy = seasonYear(d || new Date());
+  return Array.from({ length: n }, (_, i) => sy - (n - 1 - i));
+};
+// Last season tells you far less than this one, and four years ago barely
+// anything — the roster has turned over twice.
+const seasonWeight = (yr, sy) => [1, 0.55, 0.3, 0.16][Math.max(0, sy - yr)] ?? 0.1;
+
+function buildRatings(glist, sy) {
+  const W = (yr) => seasonWeight(yr, sy != null ? sy : seasonYear(new Date()));
   const idx = {}, names = [];
   const id = (ab) => (idx[ab] != null ? idx[ab] : (idx[ab] = names.push(ab) - 1));
-  const G = glist.map(([h, a, hs, as]) => [id(h), id(a), hs, as]);
+  const G = glist.map(([h, a, hs, as, yr]) => [id(h), id(a), hs, as, W(yr)]);
   const n = names.length;
   if (!n) return null;
 
+  // Everything below is weight-based, so a recent game counts for more.
   const gp = new Array(n).fill(0), mm = new Array(n).fill(0),
-        pf = new Array(n).fill(0), pa = new Array(n).fill(0);
-  for (const [h, a, hs, as] of G) {
-    gp[h]++; gp[a]++;
-    mm[h] += hs - as; mm[a] += as - hs;
-    pf[h] += hs; pa[h] += as; pf[a] += as; pa[a] += hs;
+        pf = new Array(n).fill(0), pa = new Array(n).fill(0),
+        raw = new Array(n).fill(0);
+  for (const [h, a, hs, as, w] of G) {
+    gp[h] += w; gp[a] += w; raw[h]++; raw[a]++;
+    mm[h] += w * (hs - as); mm[a] += w * (as - hs);
+    pf[h] += w * hs; pa[h] += w * as; pf[a] += w * as; pa[a] += w * hs;
   }
 
   // SRS fixed point, recentred each pass so it can't drift.
   let r = new Array(n).fill(0);
   for (let it = 0; it < 40; it++) {
     const sum = new Array(n).fill(0);
-    for (const [h, a] of G) { sum[h] += r[a]; sum[a] += r[h]; }
+    for (const [h, a, , , w] of G) { sum[h] += w * r[a]; sum[a] += w * r[h]; }
     r = r.map((_, i) => (gp[i] ? mm[i] / gp[i] + sum[i] / gp[i] : 0));
     const mean = r.reduce((x, y) => x + y, 0) / n;
     r = r.map((x) => x - mean);
@@ -1296,9 +1309,9 @@ function buildRatings(glist) {
   let def = names.map((_, i) => (gp[i] ? pa[i] / gp[i] : L));
   for (let it = 0; it < 25; it++) {
     const oS = new Array(n).fill(0), dS = new Array(n).fill(0);
-    for (const [h, a] of G) {
-      dS[h] += def[a]; oS[h] += off[a];
-      dS[a] += def[h]; oS[a] += off[h];
+    for (const [h, a, , , w] of G) {
+      dS[h] += w * def[a]; oS[h] += w * off[a];
+      dS[a] += w * def[h]; oS[a] += w * off[h];
     }
     const nOff = names.map((_, i) => (gp[i] ? pf[i] / gp[i] - dS[i] / gp[i] + L : L));
     const nDef = names.map((_, i) => (gp[i] ? pa[i] / gp[i] - oS[i] / gp[i] + L : L));
@@ -1306,7 +1319,9 @@ function buildRatings(glist) {
   }
 
   const rat = {};
-  names.forEach((ab, i) => { rat[ab] = { r: r[i], off: off[i], def: def[i], g: gp[i] }; });
+  names.forEach((ab, i) => {
+    rat[ab] = { r: r[i], off: off[i], def: def[i], g: raw[i], w: gp[i] };
+  });
   return { rat, lg: L };
 }
 
@@ -1974,7 +1989,9 @@ function ModelTab({ emp, setEmp }) {
             <b>Calibrated on {emp.n.toLocaleString()} real games</b> from {emp.years.join(", ")}
             {emp.perSeason ? ` — about ${emp.perSeason} per season` : ""}. The key-number
             weights below are measured from how those games actually finished, not estimated.
-            Spread pricing across the app uses them.
+            Spread pricing across the app uses them. Rebuilt automatically once a week, and
+            weighted so this season counts roughly twice as much as last.
+            {emp.at ? ` Last run ${shortAge(Date.now() - emp.at)}.` : ""}
             {emp.perSeason && emp.perSeason < 450 && (
               <> <b style={{ color: "#E3B448" }}>Thin sample.</b> A full FBS season is roughly
               800 games, so ESPN returned only part of it. The shape is directionally right but
@@ -1992,11 +2009,11 @@ function ModelTab({ emp, setEmp }) {
 
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "12px 0" }}>
         <button className="pull" style={{ marginTop: 0, flex: 1, minWidth: 150 }}
-          disabled={busy} onClick={() => run([2024, 2025])}>
+          disabled={busy} onClick={() => run(seasonsBack(2))}>
   {busy ? `Reading ${prog[0]} of ${prog[1]} days…` : "Calibrate · 2 seasons"}
         </button>
         <button className="pull" style={{ marginTop: 0, flex: 1, minWidth: 150 }}
-          disabled={busy} onClick={() => run([2022, 2023, 2024, 2025])}>
+          disabled={busy} onClick={() => run(seasonsBack(4))}>
           {busy ? "…" : "Calibrate · 4 seasons"}
         </button>
       </div>
@@ -2522,6 +2539,25 @@ export default function LineDesk() {
   const [weekGames, setWeekGames] = useState([]);
   const [log, setLog] = useState([]);
 
+  const [autoCal, setAutoCal] = useState(null);   // null | "running" | "done" | "failed"
+  const calTried = React.useRef(false);
+
+  useEffect(() => {
+    if (!loaded || calTried.current) return;
+    const age = emp && emp.at ? Date.now() - emp.at : Infinity;
+    const stale = age > 7 * 24 * 3600000;          // ratings drift every week
+    if (emp && !stale) return;
+    calTried.current = true;
+    setAutoCal("running");
+    (async () => {
+      try {
+        const d = await calibrate(seasonsBack(emp ? 2 : 3), () => {});
+        EMP = d; setEmp(d); setAutoCal("done");
+        try { await window.storage.set("linedesk:margins", JSON.stringify(d)); } catch (e) {}
+      } catch (e) { setAutoCal("failed"); }
+    })();
+  }, [loaded, emp]);
+
   const logPicks = (picks, d) => {
     setLog((prev) => {
       const seen = new Set(prev.map((r) => r.key));
@@ -2775,6 +2811,17 @@ export default function LineDesk() {
 
 
 
+            {autoCal === "running" && (
+              <p className="empty" style={{ paddingBottom: 4 }}>
+                Building team ratings from past results in the background — free, and it only
+                happens once a week.
+              </p>
+            )}
+            {autoCal === "failed" && (
+              <p className="empty" style={{ paddingBottom: 4, color: "#E3B448" }}>
+                Couldn't build ratings automatically. Run it yourself on the Setup tab.
+              </p>
+            )}
             <div className="stale" style={{ borderLeftColor: onEspn ? "#35D07F" : "#E3B448" }}>
               {onEspn ? (
                 <>
