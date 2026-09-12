@@ -468,6 +468,7 @@ const mult = (m) => {
 async function calibrate(years, onProgress) {
   const margins = [], totals = [];
   const team = {};                 // scoring rates, for a totals model
+  const glist = [];                // every matchup, for opponent adjustment
   const seen = new Set();          // ESPN can return a game under two queries
   let done = 0, idx = 0;
 
@@ -495,6 +496,8 @@ async function calibrate(years, onProgress) {
       };
       note((H.team || {}).abbreviation, hs, as);
       note((A.team || {}).abbreviation, as, hs);
+      const hAb = (H.team || {}).abbreviation, aAb = (A.team || {}).abbreviation;
+      if (hAb && aAb) glist.push([hAb, aAb, hs, as]);
     }
     return n;
   };
@@ -566,9 +569,11 @@ async function calibrate(years, onProgress) {
 
   const teams = {};
   for (const [k, t] of Object.entries(team)) if (t.g >= 6) teams[k] = t;
+  const built = buildRatings(glist) || { rat: {}, lg: tMean / 2 };
 
   return { mult: table, n, years, marginSd: sd, totalMean: tMean, totalSd: tSd,
            top, counts, teams, lgPts: tMean / 2, hfa: mean,
+           rat: built.rat, lg: built.lg, rated: Object.keys(built.rat).length,
            perSeason: Math.round(n / years.length), at: Date.now() };
 }
 
@@ -1252,31 +1257,80 @@ function assess(game, sum) {
 /* Projected total from scoring rates, regressed hard toward the league mean
    because a handful of games says very little. Null when there's no
    calibration to build on — no model, no pick. */
+/* Opponent-adjusted ratings. Raw scoring averages make a MAC team that hangs
+   35 on MAC defences look like a team that hangs 35 on SEC defences, which is
+   exactly how a model invents edges in small-conference games.
+
+   Margin ratings use the standard SRS fixed point: a team's rating is its
+   average margin plus the average rating of everyone it played. Offence and
+   defence are adjusted the same way against the units they actually faced. */
+function buildRatings(glist) {
+  const idx = {}, names = [];
+  const id = (ab) => (idx[ab] != null ? idx[ab] : (idx[ab] = names.push(ab) - 1));
+  const G = glist.map(([h, a, hs, as]) => [id(h), id(a), hs, as]);
+  const n = names.length;
+  if (!n) return null;
+
+  const gp = new Array(n).fill(0), mm = new Array(n).fill(0),
+        pf = new Array(n).fill(0), pa = new Array(n).fill(0);
+  for (const [h, a, hs, as] of G) {
+    gp[h]++; gp[a]++;
+    mm[h] += hs - as; mm[a] += as - hs;
+    pf[h] += hs; pa[h] += as; pf[a] += as; pa[a] += hs;
+  }
+
+  // SRS fixed point, recentred each pass so it can't drift.
+  let r = new Array(n).fill(0);
+  for (let it = 0; it < 40; it++) {
+    const sum = new Array(n).fill(0);
+    for (const [h, a] of G) { sum[h] += r[a]; sum[a] += r[h]; }
+    r = r.map((_, i) => (gp[i] ? mm[i] / gp[i] + sum[i] / gp[i] : 0));
+    const mean = r.reduce((x, y) => x + y, 0) / n;
+    r = r.map((x) => x - mean);
+  }
+
+  const totalGames = gp.reduce((x, y) => x + y, 0);
+  const L = totalGames ? pf.reduce((x, y) => x + y, 0) / totalGames : 27;
+
+  let off = names.map((_, i) => (gp[i] ? pf[i] / gp[i] : L));
+  let def = names.map((_, i) => (gp[i] ? pa[i] / gp[i] : L));
+  for (let it = 0; it < 25; it++) {
+    const oS = new Array(n).fill(0), dS = new Array(n).fill(0);
+    for (const [h, a] of G) {
+      dS[h] += def[a]; oS[h] += off[a];
+      dS[a] += def[h]; oS[a] += off[h];
+    }
+    const nOff = names.map((_, i) => (gp[i] ? pf[i] / gp[i] - dS[i] / gp[i] + L : L));
+    const nDef = names.map((_, i) => (gp[i] ? pa[i] / gp[i] - oS[i] / gp[i] + L : L));
+    off = nOff; def = nDef;
+  }
+
+  const rat = {};
+  names.forEach((ab, i) => { rat[ab] = { r: r[i], off: off[i], def: def[i], g: gp[i] }; });
+  return { rat, lg: L };
+}
+
 /* Expected margin from the same scoring ratings that drive totals. Naive,
    but genuinely independent of ESPN's projection — which is the point. */
 function projectMargin(hAb, aAb) {
-  if (!EMP || !EMP.teams || !EMP.lgPts) return null;
-  const H = EMP.teams[hAb], A = EMP.teams[aAb];
-  if (!H || !A || !H.g || !A.g) return null;
-  const L = EMP.lgPts;
-  const reg = (rate, g) => (rate * g + L * 8) / (g + 8);
-  const hOff = reg(H.pf / H.g, H.g), hDef = reg(H.pa / H.g, H.g);
-  const aOff = reg(A.pf / A.g, A.g), aDef = reg(A.pa / A.g, A.g);
-  const expH = hOff + aDef - L, expA = aOff + hDef - L;
-  return { mu: expH - expA + (EMP.hfa != null ? EMP.hfa : 2.5),
+  if (!EMP || !EMP.rat) return null;
+  const H = EMP.rat[hAb], A = EMP.rat[aAb];
+  // An unrated team is one the ratings never saw — usually FCS. No opinion.
+  if (!H || !A || H.g < 8 || A.g < 8) return null;
+  const shrink = (x, g) => (x * g) / (g + 6);      // thin samples pulled to zero
+  return { mu: shrink(H.r, H.g) - shrink(A.r, A.g) + (EMP.hfa != null ? EMP.hfa : 2.5),
            games: Math.min(H.g, A.g) };
 }
 
 function projectTotal(hAb, aAb) {
-  if (!EMP || !EMP.teams || !EMP.lgPts) return null;
-  const H = EMP.teams[hAb], A = EMP.teams[aAb];
-  if (!H || !A || !H.g || !A.g) return null;
-  const L = EMP.lgPts;
-  const reg = (rate, g) => (rate * g + L * 8) / (g + 8);   // 8 games of prior
-  const hOff = reg(H.pf / H.g, H.g), hDef = reg(H.pa / H.g, H.g);
-  const aOff = reg(A.pf / A.g, A.g), aDef = reg(A.pa / A.g, A.g);
-  return { total: (hOff + aDef - L) + (aOff + hDef - L),
-           games: Math.min(H.g, A.g) };
+  if (!EMP || !EMP.rat || !EMP.lg) return null;
+  const H = EMP.rat[hAb], A = EMP.rat[aAb];
+  if (!H || !A || H.g < 8 || A.g < 8) return null;
+  const L = EMP.lg;
+  const reg = (x, g) => (x * g + L * 8) / (g + 8);
+  const expH = reg(H.off, H.g) + reg(A.def, A.g) - L;
+  const expA = reg(A.off, A.g) + reg(H.def, H.g) - L;
+  return { total: expH + expA, games: Math.min(H.g, A.g) };
 }
 
 function assessTotal(game, sum) {
@@ -1658,6 +1712,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <p className="empty">
+          Ratings are opponent-adjusted and require at least eight games, so a team the sample
+          barely saw gets no opinion rather than a confident wrong one. That is deliberately
+          restrictive: raw scoring averages make weak-conference teams look far better than they
+          are, which is how a model manufactures edges in games nobody is watching.
           The card scans every game left in the week, not just the day on screen. Player props
           aren't covered and won't be: ESPN publishes game lines only, so there are no prop
           prices to read and no player projection behind them — a prop tab here would be
@@ -1978,10 +2036,13 @@ function ModelTab({ emp, setEmp }) {
               <b>{emp.totalMean.toFixed(1)}</b> · total standard deviation{" "}
               <b>{emp.totalSd.toFixed(1)}</b>
               {emp.hfa != null && <> · home-field advantage <b>{emp.hfa.toFixed(1)}</b></>}
-              {emp.teams && <> · scoring ratings for <b>{Object.keys(emp.teams).length}</b> teams</>}.
+              {emp.rated ? <> · opponent-adjusted ratings for <b>{emp.rated}</b> teams</> : null}.
             </p>
             <p className="kb dim">
-              That margin figure is the spread of raw results, which is wider than the {SIG_M}
+              Ratings are opponent-adjusted, so beating weak opponents by 30 doesn't read as
+            strength. Teams the sample never saw — most FCS programmes — stay unrated and the
+            card gives no opinion on their games at all.
+            That margin figure is the spread of raw results, which is wider than the {SIG_M}
               -point number the app prices with — that one is the error around the spread, and
               measuring it would need historical closing lines ESPN drops after a game ends.
               The shape is yours; the width is still an assumption.
