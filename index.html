@@ -1532,7 +1532,7 @@ function LiveGame({ game, live }) {
   );
 }
 
-function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope }) {
+function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks }) {
   const tried = React.useRef(null);
   const swept = Object.keys(boardOdds).length > 0;
 
@@ -1589,6 +1589,11 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
   const plays = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
   const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality).slice(0, 5);
   const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality).slice(0, 5);
+
+  // Record the plays as soon as they're produced, so the bar is auditable.
+  useEffect(() => {
+    if (plays.length && logPicks) logPicks(plays, day);
+  }, [plays.map(pickKey).join("|")]);
 
   const headline = (c) => (
     <span className="pside" style={{
@@ -1768,6 +1773,183 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
           because they're worth the same stake.
         </p>
       )}
+    </>
+  );
+}
+
+/* Every play the card makes gets written down with the number and price it
+   saw, then graded against the final score. Nothing else in the app can tell
+   you whether any of its thresholds are right. */
+const pickKey = (c) => `${c.game.id}:${c.kind}:${c.sideHome ? "h" : "a"}`;
+
+const toRecord = (c, day) => ({
+  key: pickKey(c),
+  espnId: c.game.espnId || null,
+  day,
+  kickAt: c.game.kickAt || null,
+  away: c.game.away, home: c.game.home,
+  aAb: c.game.aAb, hAb: c.game.hAb,
+  kind: c.kind,
+  side: c.side,
+  sideHome: !!c.sideHome,
+  homeLine: c.kind === "spread" ? c.best.L : null,
+  total: c.kind === "total" ? c.line : null,
+  over: c.kind === "total" ? !!c.over : null,
+  price: c.price,
+  ev: c.ev,
+  book: c.best.bk.n,
+  at: Date.now(),
+  result: null, hs: null, as: null,
+});
+
+function gradeOne(r, hs, as) {
+  const margin = hs - as;
+  if (r.kind === "moneyline") {
+    if (margin === 0) return "P";
+    return (r.sideHome ? margin > 0 : margin < 0) ? "W" : "L";
+  }
+  if (r.kind === "spread") {
+    const need = -r.homeLine;                 // margin the home side must beat
+    if (margin === need) return "P";
+    return (r.sideHome ? margin > need : margin < need) ? "W" : "L";
+  }
+  const sum = hs + as;
+  if (sum === r.total) return "P";
+  return (r.over ? sum > r.total : sum < r.total) ? "W" : "L";
+}
+
+const unitsOf = (r) => {
+  if (r.result === "W") { const w = payout(r.price); return w == null ? 0 : w; }
+  if (r.result === "L") return -1;
+  return 0;
+};
+
+function RecordTab({ log, setLog }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const grade = async () => {
+    const pending = log.filter((r) => !r.result && r.espnId &&
+      (!r.kickAt || Date.now() > new Date(r.kickAt).getTime() + 3 * 3600000));
+    if (!pending.length) return;
+    setBusy(true); setErr(null);
+    try {
+      const finals = {};
+      for (const d of [...new Set(pending.map((r) => r.day))]) {
+        try {
+          for (const g of parseBoard(await espnGet(`/scoreboard?dates=${d}&limit=300`)))
+            if (g.state === "post" && g.hs != null) finals[g.espnId] = { hs: g.hs, as: g.as };
+        } catch (e) { /* one day failing shouldn't block the rest */ }
+      }
+      setLog((prev) => {
+        const next = prev.map((r) => {
+          const f = !r.result && finals[r.espnId];
+          return f ? { ...r, hs: f.hs, as: f.as, result: gradeOne(r, f.hs, f.as) } : r;
+        });
+        try { window.storage.set("linedesk:log", JSON.stringify(next)); } catch (e) {}
+        return next;
+      });
+    } catch (e) { setErr("Couldn't fetch results."); }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => { grade(); }, [log.length]);
+
+  const graded = log.filter((r) => r.result);
+  const open = log.filter((r) => !r.result);
+  const tally = (rows) => {
+    const w = rows.filter((r) => r.result === "W").length;
+    const l = rows.filter((r) => r.result === "L").length;
+    const p = rows.filter((r) => r.result === "P").length;
+    const u = rows.reduce((a, r) => a + unitsOf(r), 0);
+    const risked = w + l;
+    return { w, l, p, u, roi: risked ? (u / risked) * 100 : 0 };
+  };
+  const all = tally(graded);
+
+  const clear = async () => {
+    setLog([]);
+    try { await window.storage.set("linedesk:log", "[]"); } catch (e) {}
+  };
+
+  return (
+    <>
+      <div className="stale" style={{ borderLeftColor: graded.length ? "#35D07F" : "#7E8899" }}>
+        {graded.length === 0
+          ? <>Nothing graded yet. Every play the card makes is written down automatically with the
+             number and price it saw, then scored once the game finishes. Come back after a slate.</>
+          : <><b>{all.w}-{all.l}{all.p ? `-${all.p}` : ""}</b> on graded plays,{" "}
+             <b style={{ color: all.u >= 0 ? "#35D07F" : "#FF5A47" }}>
+               {all.u >= 0 ? "+" : ""}{all.u.toFixed(2)} units</b>{" "}
+             ({all.roi >= 0 ? "+" : ""}{all.roi.toFixed(1)}% on risk).{" "}
+             {graded.length < 30 && "Far too small a sample to mean anything yet — a good system still loses plenty of thirty-bet stretches."}</>}
+        {busy && " Grading…"}
+      </div>
+      {err && <p className="err">{err}</p>}
+
+      {graded.length > 0 && (
+        <div className="keybox">
+          <span className="role">By market</span>
+          <table className="box" style={{ marginTop: 8 }}>
+            <tbody>
+              {["spread", "moneyline", "total"].map((k) => {
+                const t = tally(graded.filter((r) => r.kind === k));
+                if (!t.w && !t.l && !t.p) return null;
+                return (
+                  <tr key={k}>
+                    <td className="bv" style={{ width: "36%", fontSize: 12 }}>{k}</td>
+                    <td className="bl">{t.w}-{t.l}{t.p ? `-${t.p}` : ""}</td>
+                    <td className="bv r" style={{ color: t.u >= 0 ? "#35D07F" : "#FF5A47" }}>
+                      {t.u >= 0 ? "+" : ""}{t.u.toFixed(2)}u
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {open.length > 0 && <p className="tier">Open · {open.length}</p>}
+      {open.map((r) => (
+        <div className="gm" key={r.key} style={{ borderLeftColor: "#E3B448", cursor: "default" }}>
+          <span className="who">
+            <span className="abbr">{r.side}{r.kind === "moneyline" ? " ML" : ""}</span>
+            <span className="meta">{r.aAb} at {r.hAb} · {fmtOdds(r.price)} · {r.book}</span>
+          </span>
+        </div>
+      ))}
+
+      {graded.length > 0 && <p className="tier">Graded · {graded.length}</p>}
+      {graded.slice().sort((a, b) => b.at - a.at).map((r) => (
+        <div className="gm" key={r.key} style={{
+          borderLeftColor: r.result === "W" ? "#35D07F" : r.result === "L" ? "#FF5A47" : "#7E8899",
+          cursor: "default" }}>
+          <span className="who">
+            <span className="abbr">{r.side}{r.kind === "moneyline" ? " ML" : ""}</span>
+            <span className="meta">
+              {r.aAb} {r.as} · {r.hAb} {r.hs} · {fmtOdds(r.price)}
+            </span>
+          </span>
+          <span className="rt">
+            <span className="line" style={{
+              color: r.result === "W" ? "#35D07F" : r.result === "L" ? "#FF5A47" : "#7E8899" }}>
+              {r.result}
+            </span>
+            <span className="sub">{unitsOf(r) >= 0 ? "+" : ""}{unitsOf(r).toFixed(2)}u</span>
+          </span>
+        </div>
+      ))}
+
+      {log.length > 0 && (
+        <button className="collapse" onClick={clear}>▸ Clear the record</button>
+      )}
+
+      <p className="empty">
+        Units assume one unit risked per play at the price shown. This records what the card
+        recommended, not what you actually bet. A losing record here means the thresholds are
+        wrong and should be raised — that's the whole reason to keep it.
+      </p>
     </>
   );
 }
@@ -2374,6 +2556,18 @@ function LineDesk() {
   const [sweeping, setSweeping] = useState(false);
   const [sweptDay, setSweptDay] = useState(null);
   const [weekGames, setWeekGames] = useState([]);
+  const [log, setLog] = useState([]);
+
+  const logPicks = (picks, d) => {
+    setLog((prev) => {
+      const seen = new Set(prev.map((r) => r.key));
+      const add = picks.filter((c) => !seen.has(pickKey(c))).map((c) => toRecord(c, d));
+      if (!add.length) return prev;
+      const next = [...add, ...prev].slice(0, 500);
+      try { window.storage.set("linedesk:log", JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
   const [openLive, setOpenLive] = useState(null);
   const [sweepProg, setSweepProg] = useState([0, 0]);
   const [sort, setSort] = useState("time");
@@ -2432,6 +2626,10 @@ function LineDesk() {
           const m = await window.storage.get("linedesk:margins");
           if (m && m.value) { const d = JSON.parse(m.value); EMP = d; setEmp(d); }
         } catch (e) { /* built-in estimates stand in */ }
+        try {
+          const lg = await window.storage.get("linedesk:log");
+          if (lg && lg.value) setLog(JSON.parse(lg.value));
+        } catch (e) { /* no saved record */ }
         try {
           const bd = await window.storage.get("linedesk:board");
           if (bd && bd.value) {
@@ -2801,12 +2999,14 @@ function LineDesk() {
           </>
         )}
 
+        {tab === "record" && <RecordTab log={log} setLog={setLog} />}
+
         {tab === "card" && (
           <CardTab
             board={sweptDay === "week" && weekGames.length ? weekGames : board}
             boardOdds={sweptDay === "week" || sweptDay === day ? boardOdds : {}}
             entries={entries} sweeping={sweeping} prog={sweepProg}
-            runSweep={runSweep} day={day} scope={sweptDay}
+            runSweep={runSweep} day={day} scope={sweptDay} logPicks={logPicks}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
         )}
         {(tab === "model" || tab === "top25") && (
@@ -2825,7 +3025,7 @@ function LineDesk() {
             { k: "upcoming", l: "Board", d: "M3 5h18M3 12h18M3 19h18" },
             { k: "card", l: "Card", d: "M12 3l2.6 5.6 6.1.8-4.5 4.2 1.2 6.1L12 16.9 6.6 19.7l1.2-6.1L3.3 9.4l6.1-.8z" },
             { k: "live", l: "Live", d: "M12 8a4 4 0 100 8 4 4 0 000-8M5 5a10 10 0 000 14M19 5a10 10 0 010 14", badge: inPlay.length },
-            { k: "finals", l: "Final", d: "M4 4v16M4 4h12l-2 4 2 4H4" },
+            { k: "record", l: "Record", d: "M4 19V5m0 14h16M8 15V9m4 6V6m4 9v-4" },
             { k: "model", l: "Setup", d: "M12 9a3 3 0 100 6 3 3 0 000-6M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1A1.7 1.7 0 008.9 19a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1A1.7 1.7 0 004.6 8.9a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z", alert: !emp },
           ].map((t) => {
             const on = t.k === "model" ? (tab === "model" || tab === "top25") : tab === t.k;
@@ -2873,6 +3073,18 @@ ReactDOM.createRoot(document.getElementById("root"))
   .render(<ErrorBoundary><LineDesk /></ErrorBoundary>);
 } catch (e) { window.__ldError(e); }
 })();
+</script>
+<script>
+  // Registered after load so it never delays first paint.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("./sw.js").catch(function () {
+        /* offline support is a bonus, not a requirement */
+      });
+    });
+  }
+  window.addEventListener("online", function () { document.body.dataset.net = "on"; });
+  window.addEventListener("offline", function () { document.body.dataset.net = "off"; });
 </script>
 </body>
 </html>
