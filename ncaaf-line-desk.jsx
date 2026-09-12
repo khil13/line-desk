@@ -728,15 +728,41 @@ const CSS = `
 .fb { --bg:#0B0E14; --card:#141924; --card2:#1B2230; --edge:#28303F;
   --fg:#F2F5FA; --dim:#7E8899; --turf:#35D07F; --flag:#FF5A47; --chalk:#FFFFFF;
   background:var(--bg); color:var(--fg); font-family:'Barlow',system-ui,sans-serif;
-  min-height:100%; padding-bottom:60px; font-feature-settings:'tnum' 1; }
+  min-height:100%; font-feature-settings:'tnum' 1;
+  padding-bottom:calc(env(safe-area-inset-bottom) + 76px); }
 .num { font-family:'Oswald',Impact,sans-serif; font-weight:600; letter-spacing:0.01em; }
 .wrap { max-width:660px; margin:0 auto; padding:0 16px; }
 
-.hd { position:relative; padding:30px 0 18px; overflow:hidden; }
-.hd::after { content:''; position:absolute; left:0; right:0; bottom:0; height:20px;
-  background:repeating-linear-gradient(90deg, rgba(255,255,255,.14) 0 1px, transparent 1px 16px); }
-.hd h1 { font-family:'Oswald',sans-serif; font-weight:700; font-size:40px; line-height:.94;
-  margin:0; text-transform:uppercase; letter-spacing:0.005em; }
+/* App shell: nothing here should read as a document. */
+.fb { -webkit-tap-highlight-color:transparent; -webkit-user-select:none; user-select:none;
+  overscroll-behavior-y:contain; }
+.fb input, .fb .sel { -webkit-user-select:text; user-select:text; }
+
+.hd { position:sticky; top:0; z-index:20; padding:calc(env(safe-area-inset-top) + 14px) 0 12px;
+  background:rgba(11,14,20,.82); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--edge); display:flex; align-items:baseline; gap:10px;
+  overflow:hidden; }
+.hsub { font-family:'Oswald',sans-serif; font-size:11px; text-transform:uppercase;
+  letter-spacing:.09em; color:var(--dim); margin-left:auto; }
+
+.nav { position:fixed; left:0; right:0; bottom:0; z-index:30; display:flex;
+  background:rgba(11,14,20,.92); backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+  border-top:1px solid var(--edge);
+  padding:6px 4px calc(env(safe-area-inset-bottom) + 6px); }
+.nav button { position:relative; flex:1; background:none; border:0; color:var(--dim);
+  font-family:'Oswald',sans-serif; font-size:9.5px; text-transform:uppercase;
+  letter-spacing:.07em; display:flex; flex-direction:column; align-items:center; gap:3px;
+  padding:7px 2px 5px; cursor:pointer; min-height:48px; border-radius:8px; }
+.nav button svg { width:21px; height:21px; }
+.nav button[data-on="1"] { color:var(--turf); }
+.nav button:focus-visible { outline:2px solid var(--turf); outline-offset:-2px; }
+.bdg { position:absolute; top:3px; left:calc(50% + 7px); background:var(--flag); color:#fff;
+  font-family:'Oswald',sans-serif; font-style:normal; font-size:9px; line-height:1;
+  padding:3px 5px; border-radius:9px; }
+.bdg.warn { background:#E3B448; color:#0B0E14; }
+
+.hd h1 { font-family:'Oswald',sans-serif; font-weight:700; font-size:22px; line-height:1;
+  margin:0; text-transform:uppercase; letter-spacing:0.01em; }
 .hd h1 em { font-style:normal; color:var(--turf); }
 .hd p { color:var(--dim); font-size:13.5px; line-height:1.5; margin:10px 0 0; max-width:46ch; }
 
@@ -1409,7 +1435,7 @@ function LiveGame({ game, live }) {
   );
 }
 
-function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day }) {
+function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope }) {
   const tried = React.useRef(null);
   const swept = Object.keys(boardOdds).length > 0;
 
@@ -1418,7 +1444,7 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
   useEffect(() => {
     if (swept || sweeping || tried.current === day) return;
     tried.current = day;
-    runSweep();
+    runSweep("week");
   }, [day, swept, sweeping]);
 
   // Never recommend a game that has already kicked off, let alone finished.
@@ -1533,7 +1559,8 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <div className="stale" style={{ borderLeftColor: plays.length ? "#35D07F" : "#7E8899" }}>
-          {cands.length} spots judged across {upcoming.length} games still to kick off
+          {scope === "week" ? "Whole week · " : ""}{cands.length} spots judged across{" "}
+          {upcoming.length} games still to kick off
           {done > 0 ? `, ${done} already under way and excluded` : ""}.{" "}
           {plays.length < 6 && oneBook > cands.length * 0.6 && (
             <> <b style={{ color: "#E3B448" }}>Most of these rest on a single book.</b> ESPN's feed
@@ -1626,6 +1653,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <p className="empty">
+          The card scans every game left in the week, not just the day on screen. Player props
+          aren't covered and won't be: ESPN publishes game lines only, so there are no prop
+          prices to read and no player projection behind them — a prop tab here would be
+          invented numbers in the market with the widest margins.
           Spreads run on two models where calibration allows it — ESPN's projection and a power
           rating built from the scoring data. When they agree closely the required gap drops,
           because two independent reads landing in the same place is stronger evidence than one;
@@ -1641,6 +1672,33 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </p>
       )}
     </>
+  );
+}
+
+function KeyBox() {
+  const [val, setVal] = useState("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    try { setVal(localStorage.getItem("ld:apikey") || ""); } catch (e) {}
+  }, []);
+  const store = (v) => {
+    setVal(v);
+    try { localStorage.setItem("ld:apikey", v.trim()); } catch (e) {}
+    setSaved(true); setTimeout(() => setSaved(false), 1600);
+  };
+  return (
+    <div className="keybox">
+      <span className="role">Anthropic API key · optional</span>
+      <p className="kb" style={{ marginTop: 6 }}>
+        Everything in the app runs free without one. A key only adds the written game read.
+        It's kept in this browser and sent nowhere but Anthropic.
+      </p>
+      <input className="f sel" type="password" autoComplete="off" value={val}
+        placeholder="sk-ant-…  (leave blank to run free)"
+        style={{ textAlign: "left", marginTop: 8 }}
+        onChange={(e) => store(e.target.value)} />
+      {saved && <p className="kb" style={{ color: "#35D07F", marginTop: 6 }}>Saved to this device.</p>}
+    </div>
   );
 }
 
@@ -2218,6 +2276,7 @@ export default function LineDesk() {
   const [boardOdds, setBoardOdds] = useState({});
   const [sweeping, setSweeping] = useState(false);
   const [sweptDay, setSweptDay] = useState(null);
+  const [weekGames, setWeekGames] = useState([]);
   const [openLive, setOpenLive] = useState(null);
   const [sweepProg, setSweepProg] = useState([0, 0]);
   const [sort, setSort] = useState("time");
@@ -2283,6 +2342,7 @@ export default function LineDesk() {
             // Only restore it for the day it was taken on.
             if (o && o.odds && Date.now() - o.at < 6 * 3600000) {
               setBoardOdds(o.odds); setSweptDay(o.day);
+              if (o.games) setWeekGames(o.games);
             }
           }
         } catch (e) { /* no saved sweep */ }
@@ -2309,11 +2369,32 @@ export default function LineDesk() {
   const inPlay = pool.filter((g) =>
     g.state ? g.state === "in" : phaseOf(g.kickAt, now) === "live");
   // One sweep, callable from the board or the card.
-  const runSweep = async () => {
-    if (sweeping || !board.length) return;
-    setSweeping(true); setSweepProg([0, board.length]);
-    const r = await sweepBoard(board, (a, b) => setSweepProg([a, b]));
-    setBoardOdds(r); setSweptDay(day);
+  /* Sweep one day, or the whole football week. The week scan only looks at
+     games that haven't kicked off, which keeps it to a sane number of calls. */
+  const runSweep = async (scope) => {
+    if (sweeping) return;
+    const whole = scope === "week";
+    let games = board;
+
+    if (whole) {
+      setSweeping(true); setSweepProg([0, 0]);
+      const all = [];
+      for (const d of week) {
+        try { all.push(...parseBoard(await espnGet(`/scoreboard?dates=${d.v}&limit=300`))); }
+        catch (e) { /* a dead day shouldn't stop the rest */ }
+      }
+      const seen = new Set();
+      games = all.filter((g) => {
+        if (seen.has(g.id) || g.state !== "pre") return false;
+        seen.add(g.id); return true;
+      });
+      setWeekGames(games);
+    }
+
+    if (!games.length) { setSweeping(false); return; }
+    setSweeping(true); setSweepProg([0, games.length]);
+    const r = await sweepBoard(games, (a, b) => setSweepProg([a, b]));
+    setBoardOdds(r); setSweptDay(whole ? "week" : day);
     // Seed each game panel so opening one is instant rather than re-fetching
     // the summary the sweep already has.
     setEntries((prev) => {
@@ -2326,7 +2407,8 @@ export default function LineDesk() {
     });
     try {
       await window.storage.set("linedesk:board",
-        JSON.stringify({ day, at: Date.now(), odds: r }));
+        JSON.stringify({ day: whole ? "week" : day, at: Date.now(), odds: r,
+                        games: whole ? games : null }));
     } catch (e) { /* stays in memory */ }
     setSweeping(false);
   };
@@ -2382,25 +2464,13 @@ export default function LineDesk() {
       <div className="wrap">
         <header className="hd">
           <h1>Line<em>Desk</em></h1>
-          <p>Schedule, scores, records, rankings and sportsbook odds all come free from
-            ESPN. Open a game and it shops the books for you.</p>
-          <div className="tabs">
-            <button data-on={tab === "upcoming" ? "1" : "0"}
-              onClick={() => { setTab("upcoming"); setOpen(null); }}>This week</button>
-            <button data-on={tab === "finals" ? "1" : "0"}
-              onClick={() => { setTab("finals"); setOpen(null); }}>Final</button>
-            <button data-on={tab === "live" ? "1" : "0"}
-              onClick={() => { setTab("live"); setOpen(null); }}>
-              Live{inPlay.length > 0 ? ` (${inPlay.length})` : ""}
-            </button>
-            <button data-on={tab === "card" ? "1" : "0"}
-              onClick={() => { setTab("card"); setOpen(null); }}>Card</button>
-            <button className="gear" aria-label="Settings"
-              data-on={tab === "top25" || tab === "model" ? "1" : "0"}
-              onClick={() => { setTab(tab === "model" ? "upcoming" : "model"); setOpen(null); }}>
-              ⚙{emp ? "" : " !"}
-            </button>
-          </div>
+          <span className="hsub">
+            {tab === "card" ? "Today's card"
+              : tab === "live" ? (inPlay.length ? `${inPlay.length} running now` : "Nothing live")
+              : tab === "finals" ? "Results"
+              : tab === "model" || tab === "top25" ? "Settings"
+              : (week.find((w) => w.v === day) || {}).l || "This week"}
+          </span>
         </header>
 
         {tab === "upcoming" && (
@@ -2416,11 +2486,15 @@ export default function LineDesk() {
             </div>
             <div className="sweepbar">
               <button className="pull" style={{ marginTop: 0 }} disabled={sweeping}
-                onClick={runSweep}>
+                onClick={() => runSweep("day")}>
                 {sweeping ? `Reading game ${sweepProg[0]} of ${sweepProg[1]}…`
                   : Object.keys(boardOdds).length
-                    ? `${Object.keys(boardOdds).length} games priced · refresh`
-                    : "Load lines for the whole board"}
+                    ? `${Object.keys(boardOdds).length} games priced · refresh this day`
+                    : "Load lines for this day"}
+              </button>
+              <button className="pull" style={{ marginTop: 6 }} disabled={sweeping}
+                onClick={() => runSweep("week")}>
+                {sweeping ? "…" : "Scan the whole week · Thu through Sun"}
               </button>
               {Object.keys(boardOdds).length > 0 && (
                 <>
@@ -2631,9 +2705,11 @@ export default function LineDesk() {
         )}
 
         {tab === "card" && (
-          <CardTab board={board} boardOdds={sweptDay === day ? boardOdds : {}}
+          <CardTab
+            board={sweptDay === "week" && weekGames.length ? weekGames : board}
+            boardOdds={sweptDay === "week" || sweptDay === day ? boardOdds : {}}
             entries={entries} sweeping={sweeping} prog={sweepProg}
-            runSweep={runSweep} day={day}
+            runSweep={runSweep} day={day} scope={sweptDay}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
         )}
         {(tab === "model" || tab === "top25") && (
@@ -2642,10 +2718,32 @@ export default function LineDesk() {
               <Seg value={tab} onChange={setTab} options={[
                 { v: "model", l: "Model" }, { v: "top25", l: "Top 25" }]} />
             </div>
-            {tab === "model" && <ModelTab emp={emp} setEmp={setEmp} />}
+            {tab === "model" && <><ModelTab emp={emp} setEmp={setEmp} /><KeyBox /></>}
             {tab === "top25" && <Top25 />}
           </>
         )}
+
+        <nav className="nav" role="tablist">
+          {[
+            { k: "upcoming", l: "Board", d: "M3 5h18M3 12h18M3 19h18" },
+            { k: "card", l: "Card", d: "M12 3l2.6 5.6 6.1.8-4.5 4.2 1.2 6.1L12 16.9 6.6 19.7l1.2-6.1L3.3 9.4l6.1-.8z" },
+            { k: "live", l: "Live", d: "M12 8a4 4 0 100 8 4 4 0 000-8M5 5a10 10 0 000 14M19 5a10 10 0 010 14", badge: inPlay.length },
+            { k: "finals", l: "Final", d: "M4 4v16M4 4h12l-2 4 2 4H4" },
+            { k: "model", l: "Setup", d: "M12 9a3 3 0 100 6 3 3 0 000-6M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.9-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1A1.7 1.7 0 008.9 19a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.9 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1A1.7 1.7 0 004.6 8.9a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z", alert: !emp },
+          ].map((t) => {
+            const on = t.k === "model" ? (tab === "model" || tab === "top25") : tab === t.k;
+            return (
+              <button key={t.k} role="tab" aria-selected={on} data-on={on ? "1" : "0"}
+                onClick={() => { setTab(t.k); setOpen(null); }}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"
+                  strokeLinecap="round" strokeLinejoin="round"><path d={t.d} /></svg>
+                <span>{t.l}</span>
+                {t.badge ? <i className="bdg">{t.badge}</i> : null}
+                {t.alert ? <i className="bdg warn">!</i> : null}
+              </button>
+            );
+          })}
+        </nav>
 
         <div className="ft">
           <p>Expected value is measured against the other books loaded for that game — Pinnacle
