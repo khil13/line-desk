@@ -41,8 +41,11 @@ reports what shopping saves you against your worst book.
 either the proportional method or a power solve. Power is the default because proportional
 badly overstates heavy favorites, and college football is full of them.
 
-**Middles.** When the two best numbers sit on different lines, it works out the exact margins
-where both bets cash.
+**Middles.** When the two best-priced sides come from books quoting different numbers, it works
+out the exact window where both bets cash — and, since the two numbers can cross the other way,
+flags it just as plainly when that window is a dead zone where both bets lose instead. Either way
+it reports how much of the discrete margin (or total) distribution actually lands in that window,
+not just its width.
 
 **Line movement.** Enter the opener and it reports how far the number has moved and toward whom.
 
