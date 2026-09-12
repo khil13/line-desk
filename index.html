@@ -378,6 +378,14 @@ const parseSummary = (j, hAb, aAb) => {
     injuries: inj,
     hAts: atsOf(hAb), aAts: atsOf(aAb),
     hForm: formOf(hAb), aForm: formOf(aAb),
+    wind: (() => {
+      // ESPN puts wind in different places depending on the feed, and often
+      // not at all. Read it where it exists, otherwise say so.
+      const direct = w.windSpeed ?? w.gust ?? null;
+      if (direct != null && isFinite(Number(direct))) return Number(direct);
+      const m = /(\d{1,2})\s*mph/i.exec(w.displayValue || "");
+      return m ? Number(m[1]) : null;
+    })(),
     weather: w.temperature != null || w.displayValue
       ? { t: w.temperature ?? w.highTemperature ?? null, d: w.displayValue || "" } : null,
     venue: (gi.venue || {}).fullName || null,
@@ -1457,6 +1465,43 @@ function projectMargin(hAb, aAb) {
            games: Math.min(H.g, A.g) };
 }
 
+/* Conditions that suppress scoring. These are commonly cited magnitudes from
+   public research, not coefficients fitted to this app's data — so they're
+   capped hard and only bite in genuinely bad weather. Wind is the one that
+   matters; cold is mostly overrated by bettors. */
+function weatherDrag(sum) {
+  if (!sum) return null;
+  const w = sum.weather || {};
+  const mph = sum.wind;
+  const txt = (w.d || "").toLowerCase();
+  const parts = [];
+  let pts = 0;
+
+  if (mph != null) {
+    const over = Math.max(0, mph - 10);
+    const d = Math.min(4, over * 0.35);
+    if (d >= 0.3) { pts += d; parts.push(`${mph} mph wind`); }
+  }
+  if (w.t != null) {
+    if (w.t < 25) { pts += 1.5; parts.push(`${w.t}°`); }
+    else if (w.t < 35) { pts += 0.75; parts.push(`${w.t}°`); }
+  }
+  if (/snow|rain|storm|shower/.test(txt)) { pts += 1; parts.push(w.d); }
+
+  return { pts: Math.min(5, pts), why: parts.join(", "), knownWind: mph != null };
+}
+
+/* Injuries that bear on scoring. A quarterback out is worth points; a backup
+   safety is not. Position is the whole signal here. */
+function keyOuts(sum, ab) {
+  if (!sum || !sum.injuries) return [];
+  const t = sum.injuries.find((x) => x.ab === ab);
+  if (!t) return [];
+  return t.list.filter((i) =>
+    /^(QB|OT|OG|C|OL)$/i.test(i.pos || "") &&
+    /out|doubtful/i.test(i.status || ""));
+}
+
 function projectTotal(hAb, aAb) {
   if (!EMP || !EMP.rat || !EMP.lg) return null;
   const H = EMP.rat[hAb], A = EMP.rat[aAb];
@@ -1480,6 +1525,14 @@ function assessTotal(game, sum) {
 
   const proj = projectTotal(game.hAb, game.aAb);
   if (!proj) return null;                     // no scoring model, no opinion
+
+  const wx = weatherDrag(sum);
+  const outs = [...keyOuts(sum, game.hAb), ...keyOuts(sum, game.aAb)];
+  const qbOut = outs.some((i) => /^QB$/i.test(i.pos));
+  // A starting quarterback missing is worth points off a total; linemen less so.
+  const injDrag = (qbOut ? 3 : 0) + Math.min(2, outs.filter((i) => !/^QB$/i.test(i.pos)).length * 0.75);
+  const drag = (wx ? wx.pts : 0) + injDrag;
+  proj.total -= drag;
 
   const fail = [];
   // Lighter than the sides use: the 35% shrink below is already discounting
@@ -1519,7 +1572,12 @@ function assessTotal(game, sum) {
   if (ev > 0.25)
     fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — a number that size means the model is broken, not that the book is`);
 
+  // Backing an over into weather that suppresses scoring needs more, not less.
+  if (over && drag >= 2)
+    fail.push(`this is an over into conditions worth about ${drag.toFixed(1)} points against it`);
+
   return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail,
+           drag, wx, outs, qbOut,
            books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            games: proj.games, proj: proj.total,
            seasons: EMP && EMP.years ? EMP.years.join(", ") : null,
@@ -1712,6 +1770,16 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
               {c.res.count === 1 ? " book" : " books"}.</li>
           <li>Lands this side {(c.pModel * 100).toFixed(0)}% of the time if that holds —
               <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at {fmtOdds(c.price)}.</li>
+          {c.drag > 0.3 && (
+            <li>Projection cut <b>{c.drag.toFixed(1)}</b> points for conditions
+              {c.wx && c.wx.why ? ` — ${c.wx.why}` : ""}
+              {c.qbOut ? `${c.wx && c.wx.why ? ", and" : " —"} a quarterback listed out` : ""}
+              {!c.qbOut && c.outs && c.outs.length ? `, ${c.outs.length} lineman${c.outs.length > 1 ? "" : ""} out` : ""}.</li>
+          )}
+          {c.wx && !c.wx.knownWind && (
+            <li>ESPN didn't report wind for this game, and wind is the weather variable that
+              actually moves totals — treat this one as less informed than it looks.</li>
+          )}
           <li>Built on {Math.round(c.games)} weighted games of scoring for the thinner of the two teams
               {c.seasons ? `, drawn from ${c.seasons}` : ""} — mostly prior seasons this early,
               which is a real weakness.</li>
@@ -1851,6 +1919,11 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <p className="empty">
+          Totals are cut for wind, cold, precipitation and a quarterback or linemen listed out,
+          capped at five points between them. Those magnitudes come from published research
+          rather than anything measured here, which is why they're capped and why an over into
+          bad conditions has to clear a higher bar. Pace and explosive-play rate would improve
+          totals more than any of it, and neither is available free.
           The model uses opponent-adjusted scoring and schedule strength. It deliberately
           ignores turnover margin, third-down rate and time of possession: all three swing
           wildly year to year and describe games that already happened rather than predicting
