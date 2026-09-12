@@ -1864,12 +1864,16 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
   })();
 
   // Rank everything, then tier it. A weak spot still gets shown — it just
-  // never gets called a play.
+  // never gets called a play. Unlike plays, leans and watch used to be
+  // truncated to 5 apiece regardless of slate size — on a full Saturday
+  // that threw away most of an honestly-judged card before it ever
+  // reached the screen. Every tier is now shown in full; the bar that
+  // decides which tier something lands in hasn't moved.
   const byQuality = (a, b) => (b.ev || -1) - (a.ev || -1);
   const oneBook = cands.filter((c) => c.res && c.res.count === 1).length;
   const plays = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
-  const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality).slice(0, 5);
-  const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality).slice(0, 5);
+  const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality);
+  const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality);
 
   // Record the plays as soon as they're produced, so the bar is auditable.
   useEffect(() => {
