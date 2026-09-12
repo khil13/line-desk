@@ -576,6 +576,7 @@ const MARGIN_MULT = {
 /* Once calibrated against real results this holds the measured table and
    the built-in estimates above stop being used. */
 let EMP = null;
+let PACE = null;        // drive-derived pace, possessions and explosiveness
 const mult = (m) => {
   const a = Math.abs(m);
   if (EMP && EMP.mult[a] != null) return EMP.mult[a];
@@ -1502,6 +1503,100 @@ function keyOuts(sum, ab) {
     /out|doubtful/i.test(i.status || ""));
 }
 
+/* Drive-by-drive data from a finished game. This is where pace, possessions
+   and explosive plays actually come from — the box score alone can't give
+   them. One call per game, which is why it's a separate, slower scan. */
+function parseDrives(j) {
+  const drives = ((j.drives || {}).previous) || [];
+  if (!drives.length) return null;
+
+  // Map ESPN team ids to abbreviations via the box score.
+  const abbr = {};
+  for (const t of ((j.boxscore || {}).teams) || []) {
+    const id = String(((t.team || {}).id) || "");
+    const ab = (t.team || {}).abbreviation;
+    if (id && ab) abbr[id] = ab;
+  }
+
+  const out = {};
+  const bump = (ab, k, v) => {
+    if (!ab) return;
+    out[ab] = out[ab] || { dr: 0, pl: 0, ex: 0, sec: 0, g: 1 };
+    out[ab][k] += v;
+  };
+
+  for (const d of drives) {
+    const ab = abbr[String(((d.team || {}).id) || "")];
+    if (!ab) continue;
+    bump(ab, "dr", 1);
+    const plays = d.plays || [];
+    bump(ab, "pl", plays.length);
+    for (const pl of plays) {
+      const y = Number(pl.statYardage);
+      if (isFinite(y) && y >= 15) bump(ab, "ex", 1);
+    }
+    const m = /^(\d+):(\d{2})$/.exec(((d.timeElapsed || {}).displayValue) || "");
+    if (m) bump(ab, "sec", Number(m[1]) * 60 + Number(m[2]));
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/* Walk finished games one at a time and build real pace numbers. Slower than
+   the scoreboard sweep by an order of magnitude, so it's opt-in and only
+   covers the current season, where pace is what it is now rather than what it
+   was under a coach who left. */
+async function scanPace(days, onProgress) {
+  const ids = [];
+  for (const d of days) {
+    try {
+      for (const g of parseBoard(await espnGet(`/scoreboard?dates=${d}&limit=400`)))
+        if (g.state === "post" && g.espnId) ids.push(g.espnId);
+    } catch (e) { /* skip the day */ }
+  }
+  if (!ids.length) return null;
+
+  const acc = {};
+  let done = 0, idx = 0;
+  const merge = (src) => {
+    for (const [ab, v] of Object.entries(src)) {
+      acc[ab] = acc[ab] || { dr: 0, pl: 0, ex: 0, sec: 0, g: 0 };
+      for (const k of ["dr", "pl", "ex", "sec", "g"]) acc[ab][k] += v[k];
+    }
+  };
+  const worker = async () => {
+    while (idx < ids.length) {
+      const id = ids[idx++];
+      try {
+        const d = parseDrives(await espnGet("/summary?event=" + id, 15000));
+        if (d) merge(d);
+      } catch (e) { /* one game missing is fine */ }
+      onProgress(++done, ids.length);
+    }
+  };
+  await Promise.all([0,0,0,0,0,0,0,0].map(worker));
+
+  // League baselines, so each team reads as a ratio rather than a raw count.
+  const teams = Object.entries(acc).filter(([, v]) => v.g >= 2);
+  if (teams.length < 20) return null;
+  const avgDr = teams.reduce((a, [, v]) => a + v.dr / v.g, 0) / teams.length;
+  const avgEx = teams.reduce((a, [, v]) => a + (v.pl ? v.ex / v.pl : 0), 0) / teams.length;
+
+  const pace = {};
+  for (const [ab, v] of teams) {
+    pace[ab] = {
+      drives: v.dr / v.g,
+      plays: v.pl / v.g,
+      secPerPlay: v.pl ? v.sec / v.pl : null,
+      explosive: v.pl ? v.ex / v.pl : 0,
+      paceFactor: avgDr ? (v.dr / v.g) / avgDr : 1,
+      exFactor: avgEx ? (v.pl ? v.ex / v.pl : 0) / avgEx : 1,
+      g: v.g,
+    };
+  }
+  return { pace, avgDrives: avgDr, avgExplosive: avgEx, at: Date.now(),
+           games: ids.length, teams: Object.keys(pace).length };
+}
+
 function projectTotal(hAb, aAb) {
   if (!EMP || !EMP.rat || !EMP.lg) return null;
   const H = EMP.rat[hAb], A = EMP.rat[aAb];
@@ -1510,7 +1605,25 @@ function projectTotal(hAb, aAb) {
   const reg = (x, g) => (x * g + L * 8) / (g + 8);
   const expH = reg(H.off, H.g) + reg(A.def, A.g) - L;
   const expA = reg(A.off, A.g) + reg(H.def, H.g) - L;
-  return { total: expH + expA, games: Math.min(H.g, A.g) };
+  let total = expH + expA;
+
+  // Possessions scale scoring almost linearly, so a fast pair of offences
+  // raises a total and a grinding pair lowers it. Shrunk and capped, because
+  // early-season pace is noisy.
+  let pace = null;
+  const P = PACE && PACE.pace;
+  if (P && P[hAb] && P[aAb]) {
+    const f = (P[hAb].paceFactor + P[aAb].paceFactor) / 2;
+    const adj = 1 + Math.max(-0.12, Math.min(0.12, (f - 1) * 0.6));
+    total *= adj;
+    pace = {
+      factor: f, adj,
+      drives: (P[hAb].drives + P[aAb].drives) / 2,
+      explosive: (P[hAb].exFactor + P[aAb].exFactor) / 2,
+      games: Math.min(P[hAb].g, P[aAb].g),
+    };
+  }
+  return { total, games: Math.min(H.g, A.g), pace };
 }
 
 function assessTotal(game, sum) {
@@ -1577,7 +1690,7 @@ function assessTotal(game, sum) {
     fail.push(`this is an over into conditions worth about ${drag.toFixed(1)} points against it`);
 
   return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail,
-           drag, wx, outs, qbOut,
+           drag, wx, outs, qbOut, pace: proj.pace,
            books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            games: proj.games, proj: proj.total,
            seasons: EMP && EMP.years ? EMP.years.join(", ") : null,
@@ -1687,16 +1800,8 @@ function LiveGame({ game, live }) {
 }
 
 function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks }) {
-  const tried = React.useRef(null);
   const swept = Object.keys(boardOdds).length > 0;
-
-  // The card is built from the board sweep, so it runs the sweep itself
-  // instead of sending you to another tab to do it by hand.
-  useEffect(() => {
-    if (swept || sweeping || tried.current === day) return;
-    tried.current = day;
-    runSweep("week");
-  }, [day, swept, sweeping]);
+  // The sweep runs itself at the app level, so nothing to trigger here.
 
   // Never recommend a game that has already kicked off, let alone finished.
   const upcoming = board.filter((g) =>
@@ -1780,6 +1885,13 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
             <li>ESPN didn't report wind for this game, and wind is the weather variable that
               actually moves totals — treat this one as less informed than it looks.</li>
           )}
+          {c.pace && (
+            <li>Pace: <b>{c.pace.drives.toFixed(1)}</b> drives a game between them
+              {Math.abs(c.pace.adj - 1) > 0.01
+                ? `, moving the projection ${c.pace.adj > 1 ? "up" : "down"} ${Math.abs((c.pace.adj - 1) * 100).toFixed(1)}%`
+                : ", near league average"}
+              {c.pace.explosive ? ` · explosive plays ${(c.pace.explosive * 100).toFixed(0)}% of league rate` : ""}.</li>
+          )}
           <li>Built on {Math.round(c.games)} weighted games of scoring for the thinner of the two teams
               {c.seasons ? `, drawn from ${c.seasons}` : ""} — mostly prior seasons this early,
               which is a real weakness.</li>
@@ -1818,7 +1930,7 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
               this takes a minute and costs nothing.</>
             : <>No prices came back for this day. Either the books haven't posted yet or ESPN's
               feed is down.{" "}
-              <button className="relink" onClick={runSweep}>Try again</button></>}
+              <button className="relink" onClick={() => runSweep("week")}>Try again</button></>}
         </div>
       )}
       {!swept && sweeping && [...Array(3)].map((_, i) => <div className="skel" key={i} />)}
@@ -1919,6 +2031,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <p className="empty">
+          Pace, possessions and explosive-play rate are built from ESPN's drive-by-drive data
+          when you run that scan on the Setup tab — one request per finished game, which is why
+          it's separate. Totals then scale with how fast the two teams actually play, capped at
+          12% so early-season noise can't run away with it.
           Totals are cut for wind, cold, precipitation and a quarterback or linemen listed out,
           capped at five points between them. Those magnitudes come from published research
           rather than anything measured here, which is why they're capped and why an over into
@@ -2130,6 +2246,66 @@ function RecordTab({ log, setLog }) {
         wrong and should be raised — that's the whole reason to keep it.
       </p>
     </>
+  );
+}
+
+function PaceBox({ pace, setPace }) {
+  const [busy, setBusy] = useState(false);
+  const [prog, setProg] = useState([0, 0]);
+  const [err, setErr] = useState(null);
+
+  const run = async () => {
+    setBusy(true); setErr(null); setProg([0, 0]);
+    try {
+      // Current season only: pace is what a team does now, not under a coach
+      // who has since left.
+      const sy = seasonYear(new Date());
+      const days = [];
+      const d = new Date(Date.UTC(sy, 7, 20));
+      while (d.getUTCDay() !== 6) d.setUTCDate(d.getUTCDate() + 1);
+      for (let i = 0; i < 18; i++) {
+        for (const off of [0, -2, -1]) {
+          const x = new Date(d);
+          x.setUTCDate(d.getUTCDate() + i * 7 + off);
+          if (x > new Date()) continue;
+          days.push(x.getUTCFullYear() +
+            String(x.getUTCMonth() + 1).padStart(2, "0") +
+            String(x.getUTCDate()).padStart(2, "0"));
+        }
+      }
+      const r = await scanPace(days, (a, b) => setProg([a, b]));
+      if (!r) throw new Error("not enough finished games yet");
+      PACE = r; setPace(r);
+      try { await window.storage.set("linedesk:pace", JSON.stringify(r)); } catch (e) {}
+    } catch (e) {
+      setErr("Couldn't build pace numbers: " + (e.message || "unknown") + ".");
+    } finally { setBusy(false); }
+  };
+
+  const clear = async () => {
+    PACE = null; setPace(null);
+    try { await window.storage.delete("linedesk:pace"); } catch (e) {}
+  };
+
+  return (
+    <div className="keybox" style={{ borderLeftColor: pace ? "#35D07F" : "#E3B448" }}>
+      <span className="role">Pace, possessions and explosive plays</span>
+      <p className="kb" style={{ marginTop: 6 }}>
+        {pace
+          ? `Built from ${pace.games} finished games, covering ${pace.teams} teams — ${pace.avgDrives.toFixed(1)} drives a game league-wide. Totals are scaled by how fast each pair actually plays.`
+          : "Not built yet. These come from drive-by-drive data, which needs one request per finished game rather than one per day — slower than the other scan, and worth it only for totals."}
+      </p>
+      <button className="pull" style={{ marginTop: 8 }} disabled={busy} onClick={run}>
+        {busy ? (prog[1] ? `Reading game ${prog[0]} of ${prog[1]}…` : "Finding finished games…")
+              : pace ? "Rebuild pace numbers" : "Build pace numbers · this season"}
+      </button>
+      {err && <p className="err">{err}</p>}
+      {pace && <button className="collapse" onClick={clear}>▸ Discard pace data</button>}
+      <p className="kb dim" style={{ marginTop: 8 }}>
+        Early in a season this rests on very few games and pace is noisy, so the adjustment is
+        capped at 12% either way. It only affects totals.
+      </p>
+    </div>
   );
 }
 
@@ -2748,12 +2924,30 @@ function LineDesk() {
   const [entries, setEntries] = useState({});
   const [loaded, setLoaded] = useState(false);
   const [now, setNow] = useState(() => new Date());
-  const [live, setLive] = useState(true);
+  // Polling pauses when the app isn't visible — backgrounded on a phone, or
+  // buried behind another tab — and resumes on return. No control needed.
+  const [live, setLive] = useState(
+    () => (typeof document === "undefined" ? true : !document.hidden));
+
+  useEffect(() => {
+    const onVis = () => setLive(!document.hidden);
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    window.addEventListener("blur", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+      window.removeEventListener("blur", onVis);
+    };
+  }, []);
   const [espnGames, setEspnGames] = useState(null);
   const [emp, setEmp] = useState(null);
+  const [pace, setPace] = useState(null);
   const [boardOdds, setBoardOdds] = useState({});
   const [sweeping, setSweeping] = useState(false);
   const [sweptDay, setSweptDay] = useState(null);
+  const [sweptAt, setSweptAt] = useState(null);
+  const sweepTried = React.useRef(false);
   const [weekGames, setWeekGames] = useState([]);
   const [log, setLog] = useState([]);
 
@@ -2845,6 +3039,10 @@ function LineDesk() {
           if (m && m.value) { const d = JSON.parse(m.value); EMP = d; setEmp(d); }
         } catch (e) { /* built-in estimates stand in */ }
         try {
+          const pc = await window.storage.get("linedesk:pace");
+          if (pc && pc.value) { const d = JSON.parse(pc.value); PACE = d; setPace(d); }
+        } catch (e) { /* no pace data */ }
+        try {
           const lg = await window.storage.get("linedesk:log");
           if (lg && lg.value) setLog(JSON.parse(lg.value));
         } catch (e) { /* no saved record */ }
@@ -2854,7 +3052,7 @@ function LineDesk() {
             const o = JSON.parse(bd.value);
             // Only restore it for the day it was taken on.
             if (o && o.odds && Date.now() - o.at < 6 * 3600000) {
-              setBoardOdds(o.odds); setSweptDay(o.day);
+              setBoardOdds(o.odds); setSweptDay(o.day); setSweptAt(o.at);
               if (o.games) setWeekGames(o.games);
             }
           }
@@ -2919,6 +3117,7 @@ function LineDesk() {
       return next;
     });
     try {
+      setSweptAt(Date.now());
       await window.storage.set("linedesk:board",
         JSON.stringify({ day: whole ? "week" : day, at: Date.now(), odds: r,
                         games: whole ? games : null }));
@@ -2927,6 +3126,19 @@ function LineDesk() {
   };
 
   const week = footballWeek(now);
+
+  /* Prices the whole week without being asked. Lines move, so it refreshes
+     every 20 minutes while the app is on screen. */
+  useEffect(() => {
+    if (!loaded || sweeping) return;
+    const stale = !sweptAt || Date.now() - sweptAt > 20 * 60000;
+    const covered = sweptDay === "week" && Object.keys(boardOdds).length > 0;
+    if (covered && !stale) return;
+    if (sweepTried.current && !stale) return;
+    sweepTried.current = true;
+    const t = setTimeout(() => runSweep("week"), 400);
+    return () => clearTimeout(t);
+  }, [loaded, sweptAt, sweptDay, sweeping, live]);
 
   const shown = (() => {
     let list = board.slice();
@@ -2988,27 +3200,10 @@ function LineDesk() {
 
         {tab === "upcoming" && (
           <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
-              gap: 10, flexWrap: "wrap", padding: "16px 0 10px" }}>
-              <Seg value={live ? "on" : "off"} onChange={(v) => setLive(v === "on")}
-                options={[{ v: "on", l: "Live" }, { v: "off", l: "Paused" }]} />
-            </div>
-
             <div style={{ padding: "4px 0 12px" }}>
               <Seg value={day} onChange={setDay} options={week} />
             </div>
             <div className="sweepbar">
-              <button className="pull" style={{ marginTop: 0 }} disabled={sweeping}
-                onClick={() => runSweep("day")}>
-                {sweeping ? `Reading game ${sweepProg[0]} of ${sweepProg[1]}…`
-                  : Object.keys(boardOdds).length
-                    ? `${Object.keys(boardOdds).length} games priced · refresh this day`
-                    : "Load lines for this day"}
-              </button>
-              <button className="pull" style={{ marginTop: 6 }} disabled={sweeping}
-                onClick={() => runSweep("week")}>
-                {sweeping ? "…" : "Scan the whole week · Thu through Sun"}
-              </button>
               {Object.keys(boardOdds).length > 0 && (
                 <>
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
@@ -3043,6 +3238,15 @@ function LineDesk() {
             <div className="stale" style={{ borderLeftColor: onEspn ? "#35D07F" : "#E3B448" }}>
               {onEspn ? (
                 <>
+                  {sweeping
+                    ? <><b>Pricing the week — {sweepProg[0]} of {sweepProg[1]} games.</b> Odds,
+                        injuries and both models are loading in the background; the board works
+                        meanwhile.<br /><br /></>
+                    : Object.keys(boardOdds).length
+                      ? <><b>{Object.keys(boardOdds).length} games priced across the week</b>
+                          {sweptAt ? `, ${shortAge(Date.now() - sweptAt)}` : ""} — refreshed every
+                          20 minutes on its own.<br /><br /></>
+                      : null}
                   <b>{board.length} games from ESPN's public feed</b> — schedule, scores, records,
                   rankings, real school colors and a book line, all keyless and free. Costs you
                   nothing and refreshes every 30 seconds once games start.
@@ -3061,7 +3265,8 @@ function LineDesk() {
             </div>
 
             {shown.map((g) => {
-              const bo = sweptDay && sweptDay !== day ? null : boardOdds[g.id];
+              // The sweep covers the whole week, so a game's odds apply on any day.
+              const bo = boardOdds[g.id];
               const L = modelLine(g.wp);
               const fav = L == null ? null : L <= 0 ? g.hAb : g.aAb;
               return (
@@ -3233,7 +3438,7 @@ function LineDesk() {
         {tab === "card" && (
           <CardTab
             board={sweptDay === "week" && weekGames.length ? weekGames : board}
-            boardOdds={sweptDay === "week" || sweptDay === day ? boardOdds : {}}
+            boardOdds={boardOdds}
             entries={entries} sweeping={sweeping} prog={sweepProg}
             runSweep={runSweep} day={day} scope={sweptDay} logPicks={logPicks}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
@@ -3244,7 +3449,11 @@ function LineDesk() {
               <Seg value={tab} onChange={setTab} options={[
                 { v: "model", l: "Model" }, { v: "top25", l: "Top 25" }]} />
             </div>
-            {tab === "model" && <><ModelTab emp={emp} setEmp={setEmp} /><KeyBox /></>}
+            {tab === "model" && (
+              <><ModelTab emp={emp} setEmp={setEmp} />
+                <PaceBox pace={pace} setPace={setPace} />
+                <KeyBox /></>
+            )}
             {tab === "top25" && <Top25 />}
           </>
         )}
