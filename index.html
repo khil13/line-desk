@@ -1382,6 +1382,11 @@ function buildRatings(glist, sy) {
     r = r.map((x) => x - mean);
   }
 
+  // Strength of schedule: the weighted average opponent rating each team
+  // actually faced, using the ratings the SRS loop just converged on.
+  const oppSum = new Array(n).fill(0);
+  for (const [h, a, , , w] of G) { oppSum[h] += w * r[a]; oppSum[a] += w * r[h]; }
+
   const totalGames = gp.reduce((x, y) => x + y, 0);
   const L = totalGames ? pf.reduce((x, y) => x + y, 0) / totalGames : 27;
 
