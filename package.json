@@ -1,0 +1,8 @@
+{
+  "name": "line-desk",
+  "private": true,
+  "description": "College football line shopper. Single static HTML file; this manifest exists only to run tests.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -12,6 +12,24 @@ Open `index.html` in a browser. That's it.
 To host it on GitHub Pages: push this repo, then **Settings → Pages → Source: deploy from
 branch → `main` / root**. It'll be live at `https://<you>.github.io/<repo>/`.
 
+## Development
+
+The odds conversion, de-vig and normal-curve math live in `lib/odds-math.js` — a small,
+dependency-free module that `index.html` loads as a plain `<script>` and that
+`ncaaf-line-desk.jsx` and the tests `require()`. It's the one place that logic is defined, so
+fixing a bug there fixes it everywhere.
+
+`ncaaf-line-desk.jsx` is a plain-module mirror of the component embedded in `index.html`, kept
+around for editors/tooling that want a real `import`/`export` file to open. If you touch the
+component, apply the same edit to both files — nothing currently checks that they've stayed in
+sync.
+
+Run the math tests with `node --test` (Node 18+, nothing to install):
+
+```
+node --test
+```
+
 ## What it does
 
 **Line shopping.** Fill in what each book is offering and it ranks them by expected value,
