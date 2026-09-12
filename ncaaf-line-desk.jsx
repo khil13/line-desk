@@ -2853,7 +2853,7 @@ export default function LineDesk() {
       cache.set("board:" + d, g);
     } catch (e) {
       const c = await cache.get("board:" + d, 24 * 3600000);
-      if (c) { setEspnGames(c.data); setEspnAt(c.at); }
+      if (c && !c.stale) { setEspnGames(c.data); setEspnAt(c.at); }
       setEspnErr(e.blocked
         ? "blocked"
         : "ESPN answered with an error: " + (e.message || "unknown"));
@@ -3098,7 +3098,7 @@ export default function LineDesk() {
                   <b>{board.length} games from ESPN's public feed</b> — schedule, scores, records,
                   rankings, real school colors and a book line, all keyless and free. Costs you
                   nothing and refreshes every 30 seconds once games start.
-                  {todayAt && <> Updated {shortAge(Date.now() - todayAt)}.</>}
+                  {espnAt && <> Updated {shortAge(Date.now() - espnAt)}.</>}
                   {" "}Open a game and the odds, injuries, form and both models load free too —
                   only the written read spends Claude usage.
                 </>
