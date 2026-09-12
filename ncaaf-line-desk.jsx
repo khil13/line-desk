@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 const OddsMath = require("./lib/odds-math.js");
+const FieldGeometry = require("./lib/field-geometry.js");
 
 /* Schedules, scores and model win probabilities are real, from a live
    sports feed, captured at SNAPSHOT. Odds are yours to enter. */
@@ -180,12 +181,20 @@ const parseBoard = (j) =>
       sit: (() => {
         const q = c.situation;
         if (!q) return null;
+        // yardsToEndzone is how far the offense still has to go — unlike
+        // yardLine, it already accounts for who has the ball, so it's the
+        // one safe to use for the field diagram. Unverified against a live
+        // payload; if ESPN's field name turns out different the diagram
+        // just won't draw (y2e stays null) and the text line still shows.
+        const y2e = typeof q.yardsToEndzone === "number" ? q.yardsToEndzone : null;
+        const dist = typeof q.distance === "number" ? q.distance : null;
         return {
           poss: q.possession || null,
           down: q.downDistanceText || q.shortDownDistanceText || null,
           spot: q.possessionText || null,
           red: !!q.isRedZone,
           last: (q.lastPlay || {}).text || null,
+          y2e, dist,
         };
       })(),
       venue: (c.venue || {}).fullName || null,
@@ -402,6 +411,7 @@ const BOOKS = [
 const { toProb, toAmerican, payout, fmtOdds, devigPower, normCdf, invNorm,
         modelLine, trim, SIG_M, middleWindow } = OddsMath;
 const SIG_T = 10.5;
+const { yardToX, ballYards, lineToGainYards } = FieldGeometry;
 
 /* ────────────────────────────────────────────────
    Football margins are not a bell curve. Games end
@@ -887,6 +897,8 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
   border-radius:50%; background:var(--turf); }
 .why b { color:var(--turf); }
 .livebox { background:var(--bg); border-radius:0 0 3px 3px; padding:12px 14px; margin:-3px 0 3px; }
+.field { display:block; width:100%; height:auto; aspect-ratio:100/30; border-radius:3px;
+  margin-bottom:12px; }
 .wpbar { position:relative; height:22px; background:var(--edge); border-radius:2px;
   overflow:hidden; margin-bottom:12px; }
 .wpfill { position:absolute; right:0; top:0; bottom:0; }
@@ -1604,6 +1616,46 @@ function assessML(game, sum) {
 
 /* Expandable live detail: box score and win probability, refreshed on the
    same cadence as the scoreboard. */
+/* A 100-yard field compressed into a 0-100-wide viewBox: 0-10 is the
+   offense's own end zone, 10-90 the field itself, 90-100 the end zone
+   they're driving toward. yardToX/ballYards/lineToGainYards come from
+   lib/field-geometry.js. Built from ESPN's situation.yardsToEndzone, which
+   is unverified against a live payload — see the comment on sit in
+   parseBoard. If it's ever wrong, this component simply doesn't render
+   (LiveGame gates on sit.y2e being a real number). */
+function FieldView({ game, sit }) {
+  const possIsHome = String(sit.poss) === String(game.hId);
+  const offAb = possIsHome ? game.hAb : game.aAb;
+  const defAb = possIsHome ? game.aAb : game.hAb;
+  const offColor = tc(game, possIsHome ? "h" : "a");
+  const defColor = tc(game, possIsHome ? "a" : "h");
+
+  const ballX = yardToX(ballYards(sit.y2e));
+  const ltgX = sit.dist != null ? yardToX(lineToGainYards(sit.y2e, sit.dist)) : null;
+  const inRedZone = sit.y2e <= 20;
+
+  return (
+    <svg className="field" viewBox="0 0 100 30" preserveAspectRatio="none" role="img"
+      aria-label={`${offAb} driving toward ${defAb}'s end zone` + (sit.spot ? `, ball at ${sit.spot}` : "")}>
+      <rect x="0" y="0" width="10" height="30" fill={offColor} />
+      <rect x="90" y="0" width="10" height="30" fill={defColor} />
+      <rect x="10" y="0" width="80" height="30" fill="#0F4D2A" />
+      {inRedZone && (
+        <rect x={yardToX(80)} y="0" width={90 - yardToX(80)} height="30" fill="#FF5A47" opacity="0.18" />
+      )}
+      {[10, 20, 30, 40, 50, 60, 70, 80].map((y) => (
+        <line key={y} x1={yardToX(y)} y1="0" x2={yardToX(y)} y2="30" stroke="#3B4453" strokeWidth="0.3" />
+      ))}
+      {ltgX != null && <line x1={ltgX} y1="0" x2={ltgX} y2="30" stroke="#FFC629" strokeWidth="0.6" />}
+      <ellipse cx={ballX} cy="15" rx="1.6" ry="1" fill="#8B5A2B" stroke="#F2F5FA" strokeWidth="0.25" />
+      <text x="5" y="15" fontSize="4" fill="#F2F5FA" textAnchor="middle" dominantBaseline="middle"
+        transform="rotate(-90 5 15)">{offAb}</text>
+      <text x="95" y="15" fontSize="4" fill="#F2F5FA" textAnchor="middle" dominantBaseline="middle"
+        transform="rotate(90 95 15)">{defAb}</text>
+    </svg>
+  );
+}
+
 function LiveGame({ game, live }) {
   const [box, setBox] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1624,13 +1676,22 @@ function LiveGame({ game, live }) {
     return () => clearInterval(t);
   }, [game.espnId, live]);
 
-  if (busy && !box) return <p className="empty" style={{ padding: "10px 14px" }}>Loading the box score…</p>;
-  if (!box) return null;
+  // The field diagram only needs the scoreboard poll's situation data, not
+  // the box-score fetch above, so it can show even before or without that
+  // load finishing.
+  const sit = game.sit;
+  const showField = !!(sit && sit.y2e != null && sit.poss &&
+    (String(sit.poss) === String(game.hId) || String(sit.poss) === String(game.aId)));
 
-  const rows = STATKEYS.filter(([k]) => box.h[k] != null || box.a[k] != null);
+  if (!showField && busy && !box)
+    return <p className="empty" style={{ padding: "10px 14px" }}>Loading the box score…</p>;
+  if (!showField && !box) return null;
+
+  const rows = box ? STATKEYS.filter(([k]) => box.h[k] != null || box.a[k] != null) : [];
   return (
     <div className="livebox">
-      {box.wp != null && (
+      {showField && <FieldView game={game} sit={sit} />}
+      {box && box.wp != null && (
         <div className="wpbar">
           <div className="wpfill" style={{ width: box.wp + "%", background: tc(game, "h") }} />
           <span className="wplab l" style={{ color: tc(game, "a") }}>
@@ -1641,6 +1702,8 @@ function LiveGame({ game, live }) {
           </span>
         </div>
       )}
+      {box && (
+      <>
       <table className="box">
         <tbody>
           {rows.map(([k, label]) => (
@@ -1655,6 +1718,8 @@ function LiveGame({ game, live }) {
       <p className="empty" style={{ padding: "8px 0 0" }}>
         Win probability is ESPN's, computed from the game state — not from any betting line.
       </p>
+      </>
+      )}
     </div>
   );
 }
@@ -1702,12 +1767,16 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
   })();
 
   // Rank everything, then tier it. A weak spot still gets shown — it just
-  // never gets called a play.
+  // never gets called a play. Unlike plays, leans and watch used to be
+  // truncated to 5 apiece regardless of slate size — on a full Saturday
+  // that threw away most of an honestly-judged card before it ever
+  // reached the screen. Every tier is now shown in full; the bar that
+  // decides which tier something lands in hasn't moved.
   const byQuality = (a, b) => (b.ev || -1) - (a.ev || -1);
   const oneBook = cands.filter((c) => c.res && c.res.count === 1).length;
   const plays = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
-  const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality).slice(0, 5);
-  const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality).slice(0, 5);
+  const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality);
+  const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality);
 
   // Record the plays as soon as they're produced, so the bar is auditable.
   useEffect(() => {
