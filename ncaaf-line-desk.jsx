@@ -130,6 +130,19 @@ const fmtKick = (iso) => {
   } catch (e) { return ""; }
 };
 
+// ESPN returns overall, home, road and conference records in one array.
+const splitsOf = (side) => {
+  const out = {};
+  for (const rec of (side || {}).records || []) {
+    const k = (rec.name || rec.type || "").toLowerCase();
+    if (!rec.summary) continue;
+    if (k.includes("home")) out.home = rec.summary;
+    else if (k.includes("road") || k.includes("away")) out.road = rec.summary;
+    else if (k.includes("conf")) out.conf = rec.summary;
+  }
+  return Object.keys(out).length ? out : null;
+};
+
 const parseBoard = (j) =>
   (j.events || []).map((ev) => {
     const c = (ev.competitions || [])[0] || {};
@@ -155,6 +168,7 @@ const parseBoard = (j) =>
       aColor: legible("#" + ((A.team || {}).color || "")),
       hRec: ((H.records || [])[0] || {}).summary || null,
       aRec: ((A.records || [])[0] || {}).summary || null,
+      hSplits: splitsOf(H), aSplits: splitsOf(A),
       hR: rank(H), aR: rank(A),
       hs: H.score != null && H.score !== "" ? Number(H.score) : null,
       as: A.score != null && A.score !== "" ? Number(A.score) : null,
@@ -955,6 +969,11 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .verdict.z .vh { color:var(--fg); }
 .vb { display:block; font-size:12.5px; line-height:1.55; color:#B9C3D1; }
 .strip { font-size:11.5px; color:var(--dim); margin:0 0 14px; line-height:1.5; }
+.ratings { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:9px 0 4px; }
+.ratings span { display:flex; flex-direction:column; gap:1px; font-size:9px; color:var(--dim);
+  text-transform:uppercase; letter-spacing:.05em; }
+.ratings b { font-family:'Oswald',sans-serif; font-size:14px; font-weight:600; color:var(--fg);
+  letter-spacing:-.01em; }
 .form { display:flex; gap:4px; flex-wrap:wrap; margin:8px 0; }
 .pill { font-family:'Oswald',sans-serif; font-size:10px; padding:3px 6px; border-radius:2px;
   letter-spacing:.03em; }
@@ -1320,9 +1339,13 @@ function buildRatings(glist, sy) {
 
   const rat = {};
   names.forEach((ab, i) => {
-    rat[ab] = { r: r[i], off: off[i], def: def[i], g: raw[i], w: gp[i] };
+    rat[ab] = { r: r[i], off: off[i], def: def[i], g: raw[i], w: gp[i],
+                sos: gp[i] ? oppSum[i] / gp[i] : 0 };
   });
-  return { rat, lg: L };
+  // Rank among rated teams, so a rating reads as something concrete.
+  const order = Object.keys(rat).sort((x, y) => rat[y].r - rat[x].r);
+  order.forEach((ab, i) => { rat[ab].rank = i + 1; });
+  return { rat, lg: L, rated: order.length };
 }
 
 /* Expected margin from the same scoring ratings that drive totals. Naive,
@@ -1362,7 +1385,10 @@ function assessTotal(game, sum) {
   if (!proj) return null;                     // no scoring model, no opinion
 
   const fail = [];
-  const thin = res.count === 1 ? 1 : res.count === 2 ? 0.5 : 0;
+  // Lighter than the sides use: the 35% shrink below is already discounting
+  // the model against the market, so a full book penalty on top would leave
+  // no gap at all between the threshold and the model-error ceiling.
+  const thin = res.count === 1 ? 0.5 : res.count === 2 ? 0.25 : 0;
 
   // The market prices injuries, pace, weather and personnel that raw scoring
   // averages know nothing about. Treat its number as information and keep
@@ -1383,13 +1409,14 @@ function assessTotal(game, sum) {
   const ev = pModel * w - (1 - pModel);
 
   // Scoring rates on a handful of games are noise. Strictest gate in the app.
-  if (proj.games < 6) fail.push(`only ${proj.games} games of scoring on these teams`);
+  if (proj.games < 6)
+    fail.push(`only ${proj.games.toFixed(0)} games of scoring on these teams`);
   // A book does not miss a total by ten points. That size of disagreement is
   // the model failing, and reading it as edge is how you lose money quickly.
   if (Math.abs(rawGap) > 10)
     fail.push(`model is ${Math.abs(rawGap).toFixed(1)} points off the market, which is model error rather than an edge`);
-  if (Math.abs(gap) < 2 + thin)
-    fail.push(`only ${Math.abs(gap).toFixed(1)} points of edge once the market is weighted in, under the ${(2 + thin).toFixed(1)} needed${thin ? ` with ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
+  if (Math.abs(gap) < 1.5 + thin)
+    fail.push(`only ${Math.abs(gap).toFixed(1)} points of edge once the market is weighted in, under the ${(1.5 + thin).toFixed(1)} needed${thin ? ` with ${res.count} book${res.count === 1 ? "" : "s"}` : ""}`);
   if (ev < 0.02)
     fail.push(`only ${(ev * 100).toFixed(1)}% expected value even if the projection is right`);
   if (ev > 0.25)
@@ -1588,7 +1615,7 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
               {c.res.count === 1 ? " book" : " books"}.</li>
           <li>Lands this side {(c.pModel * 100).toFixed(0)}% of the time if that holds —
               <b> {c.ev >= 0 ? "+" : ""}{(c.ev * 100).toFixed(1)}%</b> at {fmtOdds(c.price)}.</li>
-          <li>Built on {c.games} games of scoring for the thinner of the two teams
+          <li>Built on {Math.round(c.games)} weighted games of scoring for the thinner of the two teams
               {c.seasons ? `, drawn from ${c.seasons}` : ""} — mostly prior seasons this early,
               which is a real weakness.</li>
         </>
@@ -1727,6 +1754,12 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
 
       {swept && (
         <p className="empty">
+          The model uses opponent-adjusted scoring and schedule strength. It deliberately
+          ignores turnover margin, third-down rate and time of possession: all three swing
+          wildly year to year and describe games that already happened rather than predicting
+          ones that haven't. Per-play measures — success rate, explosive-play rate, true
+          offensive efficiency — would help, but ESPN publishes no season-level play-by-play
+          to build them from.
           Ratings are opponent-adjusted and require at least eight games, so a team the sample
           barely saw gets no opinion rather than a confident wrong one. That is deliberately
           restrictive: raw scoring averages make weak-conference teams look far better than they
@@ -2296,13 +2329,28 @@ function Insight({ game, entry, patch }) {
     const ats = sum ? (side === "h" ? sum.hAts : sum.aAts) : null;
     const form = sum ? (side === "h" ? sum.hForm : sum.aForm) : null;
     const inj = injOf(ab);
+    const sp = side === "h" ? game.hSplits : game.aSplits;
+    const rt = EMP && EMP.rat ? EMP.rat[ab] : null;
     return (
       <div className="side" style={{ borderLeftColor: tc(game, side) }}>
         <span className="sname" style={{ color: tc(game, side) }}>{name}</span>
         <span className="srec">
-          {[side === "h" ? game.hRec : game.aRec, ats ? "ATS " + ats : null]
+          {[side === "h" ? game.hRec : game.aRec,
+            sp && sp.conf ? sp.conf + " conf" : null,
+            sp && (side === "h" ? sp.home : sp.road)
+              ? (side === "h" ? sp.home + " home" : sp.road + " away") : null,
+            ats ? "ATS " + ats : null]
             .filter(Boolean).join(" · ") || "no record yet"}
         </span>
+        {rt && (
+          <div className="ratings">
+            <span><b>{rt.r >= 0 ? "+" : ""}{rt.r.toFixed(1)}</b>rating{
+              rt.rank ? ` · #${rt.rank}` : ""}</span>
+            <span><b>{rt.off.toFixed(1)}</b>adj off</span>
+            <span><b>{rt.def.toFixed(1)}</b>adj def</span>
+            <span><b>{rt.sos >= 0 ? "+" : ""}{rt.sos.toFixed(1)}</b>schedule</span>
+          </div>
+        )}
         {form && form.length > 0 && (
           <div className="form">
             {form.map((f, i) => (
