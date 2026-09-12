@@ -399,8 +399,8 @@ const BOOKS = [
 /* ── Math (unchanged — this part was working) ──── */
 /* Odds conversion, de-vig and normal-curve math live in lib/odds-math.js,
    shared with the tests, so this logic has exactly one definition. */
-const { toProb, toAmerican, payout, fmtOdds, devigPower, erf, normCdf, invNorm,
-        round5, modelLine, trim, SIG_M, middleWindow } = OddsMath;
+const { toProb, toAmerican, payout, fmtOdds, devigPower, normCdf, invNorm,
+        modelLine, trim, SIG_M, middleWindow } = OddsMath;
 const SIG_T = 10.5;
 
 /* ────────────────────────────────────────────────
@@ -1034,9 +1034,6 @@ function Track({ marks }) {
     </div>
   );
 }
-
-const KEYS = ["dk", "fd", "mgm", "czr", "pin"];
-const nameOf = (k) => (BOOKS.find((b) => b.k === k) || {}).n || k;
 
 /* Restored: an over-eager cleanup slice removed these along with the
    components they supported. */
@@ -2877,7 +2874,6 @@ export default function LineDesk() {
   const [sort, setSort] = useState("time");
   const [onlyMkt, setOnlyMkt] = useState(false);
   const [today, setToday] = useState([]);
-  const [todayAt, setTodayAt] = useState(null);
   const [espnAt, setEspnAt] = useState(null);
   const [espnErr, setEspnErr] = useState(null);
   // Default to today when today is part of the week, otherwise Saturday.
@@ -3059,7 +3055,7 @@ export default function LineDesk() {
   const loadNow = async () => {
     try {
       const g = parseBoard(await espnGet("/scoreboard?limit=300"));
-      setToday(g); setTodayAt(Date.now());
+      setToday(g);
     } catch (e) { /* the selected-day board still covers its own games */ }
   };
 
