@@ -14,10 +14,11 @@ branch → `main` / root**. It'll be live at `https://<you>.github.io/<repo>/`.
 
 ## Development
 
-The odds conversion, de-vig and normal-curve math live in `lib/odds-math.js` — a small,
-dependency-free module that `index.html` loads as a plain `<script>` and that
-`ncaaf-line-desk.jsx` and the tests `require()`. It's the one place that logic is defined, so
-fixing a bug there fixes it everywhere.
+The odds conversion, de-vig and normal-curve math live in `lib/odds-math.js`, and the live field
+diagram's coordinate math lives in `lib/field-geometry.js` — small, dependency-free modules that
+`index.html` loads as plain `<script>` tags and that `ncaaf-line-desk.jsx` and the tests
+`require()`. They're the one place each piece of logic is defined, so fixing a bug there fixes it
+everywhere.
 
 `ncaaf-line-desk.jsx` is a plain-module mirror of the component embedded in `index.html`, kept
 around for editors/tooling that want a real `import`/`export` file to open. If you touch the
@@ -56,7 +57,10 @@ between the two models is your honest uncertainty band.
 **Board scan.** Sweeps every game and sorts by how far apart the books are, flagging gaps that
 cross key numbers (3, 7, 10, 14).
 
-**Live scores**, rankings, records and schedule, refreshing every 30 seconds during games.
+**Live scores**, rankings, records and schedule, refreshing every 30 seconds during games. Open a
+live game on the Live tab and it draws the field: the ball spotted where it actually is, the
+line to gain marked, the offense always running left to right regardless of which real end zone
+they're facing. Falls back to the plain down-and-distance text if that data isn't there.
 
 ## Data sources
 
@@ -110,6 +114,10 @@ These are real and worth understanding before you bet anything.
   wrong. Check anything you'd act on.
 - **Don't live bet off the scores.** They're a real feed, but anyone watching the broadcast
   sees the play before the scoreboard updates.
+- **The field diagram reads an ESPN field it hasn't been checked against live.** It's built from
+  documented shapes for `situation.yardsToEndzone`/`distance`, not a payload watched during an
+  actual game. If ESPN's field turns out different it just won't draw — you'll still get the
+  down-and-distance text — but treat the ball spot as unverified until you've watched it live.
 
 ## License
 
