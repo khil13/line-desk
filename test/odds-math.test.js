@@ -2,7 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   toProb, toAmerican, payout, fmtOdds, devigPower,
-  normCdf, invNorm, round5, modelLine, trim,
+  normCdf, invNorm, round5, modelLine, trim, middleWindow,
 } = require("../lib/odds-math.js");
 
 test("toProb converts American odds to implied probability", () => {
@@ -71,4 +71,39 @@ test("trim drops a trailing .0 but keeps other decimals", () => {
   assert.equal(trim(3.0), "3");
   assert.equal(trim(3.5), "3.5");
   assert.equal(trim(-7.0), "-7");
+});
+
+test("middleWindow finds a real middle on a spread when the away number is the bigger cushion", () => {
+  // Away bought at home -6.5 (away +6.5), home bought at home -3.
+  // A home win by 4, 5 or 6 cashes both: home covers -3, and away's +6.5
+  // number means away only needed to lose by less than 6.5.
+  const w = middleWindow("sp", -6.5, -3);
+  assert.deepEqual(w, { lo: 3, hi: 6.5, width: 3.5, bothWin: true });
+});
+
+test("middleWindow finds a dead zone on a spread when the numbers cross the other way", () => {
+  // Away bought at home -3 (away +3), home bought at home -6.5.
+  // A home win by 4, 5 or 6 loses both: away needed a margin under 3,
+  // home needed a margin over 6.5 — neither happened.
+  const w = middleWindow("sp", -3, -6.5);
+  assert.deepEqual(w, { lo: 3, hi: 6.5, width: 3.5, bothWin: false });
+});
+
+test("middleWindow finds a real middle on a total when Over's number is lower than Under's", () => {
+  // Over bought at 55.5, Under bought at 58.5. A final total of 56, 57 or
+  // 58 cashes both.
+  const w = middleWindow("tot", 55.5, 58.5);
+  assert.deepEqual(w, { lo: 55.5, hi: 58.5, width: 3, bothWin: true });
+});
+
+test("middleWindow finds a dead zone on a total when the numbers cross the other way", () => {
+  const w = middleWindow("tot", 58.5, 55.5);
+  assert.deepEqual(w, { lo: 55.5, hi: 58.5, width: 3, bothWin: false });
+});
+
+test("middleWindow is null when both sides came from the same number or are missing", () => {
+  assert.equal(middleWindow("sp", -3, -3), null);
+  assert.equal(middleWindow("tot", 55.5, 55.5), null);
+  assert.equal(middleWindow("sp", null, -3), null);
+  assert.equal(middleWindow("ml", NaN, NaN), null);
 });

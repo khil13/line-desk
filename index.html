@@ -497,7 +497,7 @@ const BOOKS = [
 /* Odds conversion, de-vig and normal-curve math live in lib/odds-math.js,
    shared with the tests, so this logic has exactly one definition. */
 const { toProb, toAmerican, payout, fmtOdds, devigPower, erf, normCdf, invNorm,
-        round5, modelLine, trim, SIG_M } = window.OddsMath;
+        round5, modelLine, trim, SIG_M, middleWindow } = window.OddsMath;
 const SIG_T = 10.5;
 
 /* ────────────────────────────────────────────────
@@ -777,8 +777,18 @@ function shop(market, game, rows, devig) {
   const bestA = priced.reduce((m, q) => (m == null || q.evA > m.evA ? q : m), null);
   const bestB = priced.reduce((m, q) => (m == null || q.evB > m.evB ? q : m), null);
 
+  // bestA and bestB can come from different books quoting different numbers.
+  // That gap is either a middle (both bets cash) or a dead zone (both lose) —
+  // see middleWindow's own comment for the sign reasoning.
+  const middle = market === "ml" ? null : middleWindow(market, bestA.L, bestB.L);
+  if (middle) {
+    middle.mass = market === "sp"
+      ? marginPmf(cons, SIG_M).p.reduce((s, [m, q]) => s + (m > middle.lo && m < middle.hi ? q : 0), 0)
+      : normCdf((middle.hi - cons) / SIG_T) - normCdf((middle.lo - cons) / SIG_T);
+  }
+
   return {
-    sideA, sideB, cons, priced, bestA, bestB, openAnchor, usePin,
+    sideA, sideB, cons, priced, bestA, bestB, openAnchor, usePin, middle,
     shoppedCost: toProb(bestA.oa) + toProb(bestB.ob) - 1,
     worstHold: Math.max(...live.map((q) => q.hold)),
     count: live.length,
@@ -2603,6 +2613,23 @@ function Insight({ game, entry, patch }) {
   };
   const v = verdict();
 
+  // bestA and bestB can come from different books quoting different
+  // numbers — that gap is either a middle (both bets cash) or a dead zone
+  // (both lose), computed in shop() itself.
+  const midHint = (() => {
+    if (!res || !res.middle) return null;
+    const bkA = (entry.bookNames || {})[res.bestA.bk.k] || res.bestA.bk.n;
+    const bkB = (entry.bookNames || {})[res.bestB.bk.k] || res.bestB.bk.n;
+    const unit = mk === "sp" ? "margin" : "total";
+    const range = `${trim(res.middle.lo)}–${trim(res.middle.hi)}${mk === "tot" ? " points" : ""}`;
+    return res.middle.bothWin
+      ? `${bkA} and ${bkB} quote different numbers here. If the ${unit} lands ${range}, both ` +
+        `${res.sideA} and ${res.sideB} cash — about ${pct(res.middle.mass)} of outcomes land there.`
+      : `${bkA} and ${bkB} quote different numbers here, the wrong way. If the ${unit} lands ${range}, ` +
+        `both ${res.sideA} and ${res.sideB} lose — about ${pct(res.middle.mass)} of outcomes do. ` +
+        `That's the cost of taking each side's best number from a different book.`;
+  })();
+
   const marks = [];
   if (mk === "sp") {
     if (feedMu != null) marks.push({ k: "Feed", v: feedMu, txt: mLabel(feedMu), c: mColor(feedMu) });
@@ -2741,6 +2768,13 @@ function Insight({ game, entry, patch }) {
               <div className="kv"><span>Cost at your worst book</span>
                 <b style={{ color: "#FF5A47" }}>{pct(res.worstHold)}</b></div>
             )}
+            {res.middle && (
+              <div className="kv"><span>{res.middle.bothWin ? "Middle" : "Dead zone"}</span>
+                <b style={{ color: res.middle.bothWin ? "#35D07F" : "#FF5A47" }}>
+                  {trim(res.middle.lo)}–{trim(res.middle.hi)}{mk === "tot" ? " pts" : ""}
+                  {" "}({pct(res.middle.mass)})
+                </b></div>
+            )}
           </div>
           {res.count === 1 ? (
             <p className="hint" style={{ margin: "11px 0 0", paddingTop: 11, borderTop: "1px solid #28303F" }}>
@@ -2753,6 +2787,11 @@ function Insight({ game, entry, patch }) {
               Both sides negative is normal — every price carries vig and the benchmark is these
               same books averaged. A bet clears zero only when one book sits far enough off the
               others to beat its own juice.
+            </p>
+          )}
+          {midHint && (
+            <p className="hint" style={{ margin: "11px 0 0", paddingTop: 11, borderTop: "1px solid #28303F" }}>
+              {midHint}
             </p>
           )}
         </div>
