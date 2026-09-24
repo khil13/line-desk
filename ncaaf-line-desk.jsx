@@ -690,9 +690,9 @@ function shop(market, game, rows, devig) {
   const bestA = priced.reduce((m, q) => (m == null || q.evA > m.evA ? q : m), null);
   const bestB = priced.reduce((m, q) => (m == null || q.evB > m.evB ? q : m), null);
 
-  // bestA and bestB can come from different books quoting different
-  // numbers. That gap is either a middle (both bets cash) or a dead zone
-  // (both lose) — see middleWindow's own comment for the sign reasoning.
+  // bestA and bestB can come from different books quoting different numbers.
+  // That gap is either a middle (both bets cash) or a dead zone (both lose) —
+  // see middleWindow's own comment for the sign reasoning.
   const middle = market === "ml" ? null : middleWindow(market, bestA.L, bestB.L);
   if (middle) {
     middle.mass = market === "sp"
@@ -1068,24 +1068,45 @@ const cache = {
   },
 };
 
+// The one place the model is named, so moving to a newer one is one edit.
+const CLAUDE_MODEL = "claude-sonnet-5";
+
 const askClaude = async (prompt, useSearch = true, ms = 60000) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
+  const messages = [{ role: "user", content: prompt }];
+  const text = [];
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6", max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }],
-        ...(useSearch ? { tools: [{ type: "web_search_20250305", name: "web_search" }] } : {}),
-      }),
-    });
-    if (!r.ok) throw new Error("bad response");
-    const j = await r.json();
-    return (j.content || []).filter((c) => c.type === "text")
-      .map((c) => c.text).join("\n").trim();
+    // A search-heavy answer can come back as pause_turn part way through;
+    // sending it back as-is lets the model pick up where it stopped.
+    for (let turn = 0; turn < 4; turn++) {
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // 1000 used to cut reads off mid-sentence, and search results eat
+          // into the same budget.
+          model: CLAUDE_MODEL, max_tokens: 8000,
+          messages,
+          ...(useSearch ? { tools: [{ type: "web_search_20260209", name: "web_search" }] } : {}),
+        }),
+      });
+      if (!r.ok) throw new Error("bad response " + r.status);
+      const j = await r.json();
+      const content = j.content || [];
+      for (const c of content) if (c.type === "text") text.push(c.text);
+
+      if (j.stop_reason === "refusal") throw new Error("declined");
+      if (j.stop_reason === "pause_turn") {
+        messages.push({ role: "assistant", content });
+        continue;
+      }
+      // Say so rather than pass off half an answer as the whole one.
+      if (j.stop_reason === "max_tokens") text.push("[Cut off — the answer hit its length limit.]");
+      break;
+    }
+    return text.join("\n").trim();
   } finally { clearTimeout(timer); }
 };
 
@@ -1724,7 +1745,7 @@ function LiveGame({ game, live }) {
   );
 }
 
-function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks }) {
+function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks, autoCal }) {
   const swept = Object.keys(boardOdds).length > 0;
   // The sweep runs itself at the app level, so nothing to trigger here.
 
@@ -1733,10 +1754,15 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
     g.state ? g.state === "pre" : !(g.hs != null && g.as != null));
   const done = board.length - upcoming.length;
 
+  let totalsPosted = 0;
   const raw = upcoming.flatMap((g) => {
     const sum = (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum;
+    if (sum && Array.isArray(sum.pick) && sum.pick.some((b) => b.tot != null)) totalsPosted++;
     return [assess(g, sum), assessML(g, sum), assessTotal(g, sum)].filter(Boolean);
   });
+  const totalsJudged = raw.filter((c) => c.kind === "total").length;
+  // Same test projectTotal applies — without ratings every total drops out.
+  const hasRatings = !!(EMP && EMP.rat && EMP.lg);
 
   /* A spread and a moneyline on the same team are the same opinion at two
      prices — listing both invites staking one position twice. Keep the
@@ -1869,6 +1895,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
           {scope === "week" ? "Whole week · " : ""}{cands.length} spots judged across{" "}
           {upcoming.length} games still to kick off
           {done > 0 ? `, ${done} already under way and excluded` : ""}.{" "}
+          {hasRatings && totalsPosted > 0 && (
+            <>Totals judged on {totalsJudged} of the {totalsPosted} games with one posted
+            {totalsJudged < totalsPosted ? " — the rest are missing a rating for one team or a usable price" : ""}.{" "}</>
+          )}
           {plays.length < 6 && oneBook > cands.length * 0.6 && (
             <> <b style={{ color: "#E3B448" }}>Most of these rest on a single book.</b> ESPN's feed
             carries one price on small games, so those picks can't be cross-checked and have to
@@ -1883,12 +1913,16 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </div>
       )}
 
-      {swept && !(EMP && EMP.teams) && (
+      {swept && !hasRatings && (
         <div className="stale" style={{ borderLeftColor: "#E3B448" }}>
-          <b>No totals on this card, and that's fixable.</b> Over/under needs a scoring model, and
-          yours predates it — the calibration that built your key numbers didn't collect points for
-          and against. Re-run it on the ⚙ tab and every total on the board becomes judgeable.
-          Spreads and moneylines are unaffected.
+          {autoCal === "running"
+            ? <><b>Totals are on their way.</b> Building the scoring ratings over/under needs from
+              recent seasons — they'll join the card as soon as that finishes. Spreads and
+              moneylines are unaffected.</>
+            : <><b>No totals on this card, and that's fixable.</b> Over/under needs a scoring model,
+              and yours predates it — the calibration that built your key numbers didn't collect
+              points for and against. Re-run it on the ⚙ tab and every total on the board becomes
+              judgeable. Spreads and moneylines are unaffected.</>}
         </div>
       )}
 
@@ -2916,7 +2950,11 @@ export default function LineDesk() {
     if (!loaded || calTried.current) return;
     const age = emp && emp.at ? Date.now() - emp.at : Infinity;
     const stale = age > 7 * 24 * 3600000;          // ratings drift every week
-    if (emp && !stale) return;
+    // A calibration saved before scoring ratings existed has no rat/lg, so
+    // it can't judge a single total. Treat it as stale rather than letting
+    // totals vanish from the card for up to a week.
+    const noRatings = emp && !(emp.rat && emp.lg);
+    if (emp && !stale && !noRatings) return;
     calTried.current = true;
     setAutoCal("running");
     (async () => {
@@ -3398,6 +3436,7 @@ export default function LineDesk() {
             boardOdds={boardOdds}
             entries={entries} sweeping={sweeping} prog={sweepProg}
             runSweep={runSweep} day={day} scope={sweptDay} logPicks={logPicks}
+            autoCal={autoCal}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
         )}
         {(tab === "model" || tab === "top25") && (

@@ -22,8 +22,8 @@ everywhere.
 
 `ncaaf-line-desk.jsx` is a plain-module mirror of the component embedded in `index.html`, kept
 around for editors/tooling that want a real `import`/`export` file to open. If you touch the
-component, apply the same edit to both files — nothing currently checks that they've stayed in
-sync.
+component, apply the same edit to both files — `test/component-sync.test.js` fails if they
+drift apart.
 
 Run the math tests with `node --test` (Node 18+, nothing to install):
 

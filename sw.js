@@ -3,7 +3,9 @@
    ESPN data is always tried from the network first — a stale score shown as
    though it were live would be worse than no score at all. */
 
-const SHELL = "linedesk-shell-v1";
+// Bump SHELL whenever the caching strategy changes; v1 served lib/*.js cache-
+// first forever, so a fixed math file never reached returning visitors.
+const SHELL = "linedesk-shell-v2";
 const DATA = "linedesk-data-v1";
 
 const SHELL_URLS = [
@@ -76,7 +78,26 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // Everything else — scripts, fonts — is versioned, so cache first.
+  // Our own files (lib/*.js and the like) aren't versioned in their URLs, so
+  // the same network-first rule as the page: always fresh when online, the
+  // cached copy only when offline. Otherwise a fix to the math would load
+  // the new index.html against the old library.
+  if (url.origin === self.location.origin) {
+    e.respondWith(
+      fetch(req)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(SHELL).then((c) => c.put(req, copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match(req).then((r) => r || Promise.reject(new Error("offline"))))
+    );
+    return;
+  }
+
+  // Everything else — CDN scripts, fonts — is versioned, so cache first.
   e.respondWith(
     caches.match(req).then((hit) =>
       hit || fetch(req).then((res) => {
