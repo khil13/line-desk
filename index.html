@@ -1821,7 +1821,7 @@ function LiveGame({ game, live }) {
   );
 }
 
-function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks }) {
+function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks, autoCal }) {
   const swept = Object.keys(boardOdds).length > 0;
   // The sweep runs itself at the app level, so nothing to trigger here.
 
@@ -1830,10 +1830,15 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
     g.state ? g.state === "pre" : !(g.hs != null && g.as != null));
   const done = board.length - upcoming.length;
 
+  let totalsPosted = 0;
   const raw = upcoming.flatMap((g) => {
     const sum = (entries[g.id] || {}).sum || (boardOdds[g.id] || {}).sum;
+    if (sum && Array.isArray(sum.pick) && sum.pick.some((b) => b.tot != null)) totalsPosted++;
     return [assess(g, sum), assessML(g, sum), assessTotal(g, sum)].filter(Boolean);
   });
+  const totalsJudged = raw.filter((c) => c.kind === "total").length;
+  // Same test projectTotal applies — without ratings every total drops out.
+  const hasRatings = !!(EMP && EMP.rat && EMP.lg);
 
   /* A spread and a moneyline on the same team are the same opinion at two
      prices — listing both invites staking one position twice. Keep the
@@ -1966,6 +1971,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
           {scope === "week" ? "Whole week · " : ""}{cands.length} spots judged across{" "}
           {upcoming.length} games still to kick off
           {done > 0 ? `, ${done} already under way and excluded` : ""}.{" "}
+          {hasRatings && totalsPosted > 0 && (
+            <>Totals judged on {totalsJudged} of the {totalsPosted} games with one posted
+            {totalsJudged < totalsPosted ? " — the rest are missing a rating for one team or a usable price" : ""}.{" "}</>
+          )}
           {plays.length < 6 && oneBook > cands.length * 0.6 && (
             <> <b style={{ color: "#E3B448" }}>Most of these rest on a single book.</b> ESPN's feed
             carries one price on small games, so those picks can't be cross-checked and have to
@@ -1980,12 +1989,16 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </div>
       )}
 
-      {swept && !(EMP && EMP.teams) && (
+      {swept && !hasRatings && (
         <div className="stale" style={{ borderLeftColor: "#E3B448" }}>
-          <b>No totals on this card, and that's fixable.</b> Over/under needs a scoring model, and
-          yours predates it — the calibration that built your key numbers didn't collect points for
-          and against. Re-run it on the ⚙ tab and every total on the board becomes judgeable.
-          Spreads and moneylines are unaffected.
+          {autoCal === "running"
+            ? <><b>Totals are on their way.</b> Building the scoring ratings over/under needs from
+              recent seasons — they'll join the card as soon as that finishes. Spreads and
+              moneylines are unaffected.</>
+            : <><b>No totals on this card, and that's fixable.</b> Over/under needs a scoring model,
+              and yours predates it — the calibration that built your key numbers didn't collect
+              points for and against. Re-run it on the ⚙ tab and every total on the board becomes
+              judgeable. Spreads and moneylines are unaffected.</>}
         </div>
       )}
 
@@ -3013,7 +3026,11 @@ function LineDesk() {
     if (!loaded || calTried.current) return;
     const age = emp && emp.at ? Date.now() - emp.at : Infinity;
     const stale = age > 7 * 24 * 3600000;          // ratings drift every week
-    if (emp && !stale) return;
+    // A calibration saved before scoring ratings existed has no rat/lg, so
+    // it can't judge a single total. Treat it as stale rather than letting
+    // totals vanish from the card for up to a week.
+    const noRatings = emp && !(emp.rat && emp.lg);
+    if (emp && !stale && !noRatings) return;
     calTried.current = true;
     setAutoCal("running");
     (async () => {
@@ -3495,6 +3512,7 @@ function LineDesk() {
             boardOdds={boardOdds}
             entries={entries} sweeping={sweeping} prog={sweepProg}
             runSweep={runSweep} day={day} scope={sweptDay} logPicks={logPicks}
+            autoCal={autoCal}
             onOpen={(id) => { setTab("upcoming"); setOpen(id); }} />
         )}
         {(tab === "model" || tab === "top25") && (
