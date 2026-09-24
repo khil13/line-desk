@@ -1068,24 +1068,45 @@ const cache = {
   },
 };
 
+// The one place the model is named, so moving to a newer one is one edit.
+const CLAUDE_MODEL = "claude-sonnet-5";
+
 const askClaude = async (prompt, useSearch = true, ms = 60000) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
+  const messages = [{ role: "user", content: prompt }];
+  const text = [];
   try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      signal: ctrl.signal,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6", max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }],
-        ...(useSearch ? { tools: [{ type: "web_search_20250305", name: "web_search" }] } : {}),
-      }),
-    });
-    if (!r.ok) throw new Error("bad response");
-    const j = await r.json();
-    return (j.content || []).filter((c) => c.type === "text")
-      .map((c) => c.text).join("\n").trim();
+    // A search-heavy answer can come back as pause_turn part way through;
+    // sending it back as-is lets the model pick up where it stopped.
+    for (let turn = 0; turn < 4; turn++) {
+      const r = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // 1000 used to cut reads off mid-sentence, and search results eat
+          // into the same budget.
+          model: CLAUDE_MODEL, max_tokens: 8000,
+          messages,
+          ...(useSearch ? { tools: [{ type: "web_search_20260209", name: "web_search" }] } : {}),
+        }),
+      });
+      if (!r.ok) throw new Error("bad response " + r.status);
+      const j = await r.json();
+      const content = j.content || [];
+      for (const c of content) if (c.type === "text") text.push(c.text);
+
+      if (j.stop_reason === "refusal") throw new Error("declined");
+      if (j.stop_reason === "pause_turn") {
+        messages.push({ role: "assistant", content });
+        continue;
+      }
+      // Say so rather than pass off half an answer as the whole one.
+      if (j.stop_reason === "max_tokens") text.push("[Cut off — the answer hit its length limit.]");
+      break;
+    }
+    return text.join("\n").trim();
   } finally { clearTimeout(timer); }
 };
 
