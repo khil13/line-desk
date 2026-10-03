@@ -20,7 +20,7 @@ function embedded() {
   const to = lines.findIndex((l) => /^\s*class ErrorBoundary\b/.test(l));
   assert.ok(from > 0 && to > from, "couldn't find the component inside index.html");
   return lines.slice(from, to).join("\n")
-    .replace(/window\.(OddsMath|FieldGeometry|CardStats)\b/g, "$1");
+    .replace(/window\.(OddsMath|FieldGeometry|CardStats|EspnParse)\b/g, "$1");
 }
 
 function mirror() {

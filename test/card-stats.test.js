@@ -47,6 +47,18 @@ test("totals show market, projection and the 35/65 blend", () => {
   assert.ok(val(rows, "Stays under"));
 });
 
+test("a whole-number line shows its push chance and prices off non-push outcomes", () => {
+  const c = {
+    kind: "spread", sideHome: true, gap: 3, need: 1.5, pModel: 0.6, pWin: 0.56, pPush: 0.08,
+    pFair: 0.56 / 0.92, ev: 0.1, price: "-110", res: { cons: 6, count: 3, usePin: false },
+    modelMu: 9, espnMu: 9, both: false, onKey: true,
+  };
+  const rows = pickStats(c);
+  assert.equal(val(rows, "Covers").v, "56.0%");
+  assert.equal(val(rows, "Covers").note, "push 8.0% · key number");
+  assert.equal(val(rows, "Fair price").v, "-156");
+});
+
 test("bookLines quotes every book on the picked side, best book first", () => {
   const c = {
     kind: "spread", sideHome: true, best: { bk: bk("fd", "FD") },

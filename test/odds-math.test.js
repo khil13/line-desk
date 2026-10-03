@@ -107,3 +107,32 @@ test("middleWindow is null when both sides came from the same number or are miss
   assert.equal(middleWindow("sp", null, -3), null);
   assert.equal(middleWindow("ml", NaN, NaN), null);
 });
+
+const { totalProb, evOf, fairProb } = require("../lib/odds-math.js");
+
+test("totalProb on a half-point line has no push and matches the normal tail", () => {
+  const t = totalProb(50, 50.5, 10.5);
+  assert.equal(t.push, 0);
+  assert.ok(Math.abs(t.over + t.under - 1) < 1e-12);
+  assert.ok(t.over < 0.5);
+});
+
+test("totalProb on a whole-number line carries a push chance", () => {
+  const t = totalProb(51, 51, 10.5);
+  assert.ok(t.push > 0.03 && t.push < 0.045, `push ${t.push}`);
+  assert.ok(Math.abs(t.over - t.under) < 1e-12, "symmetric at the mean");
+  assert.ok(Math.abs(t.over + t.push + t.under - 1) < 1e-12);
+});
+
+test("evOf returns the stake on a push instead of counting it as half a win", () => {
+  // 50/50 with no push at -110 loses 4.5 cents...
+  assert.ok(Math.abs(evOf(0.5, 0.5, -110) - (0.5 * 100 / 110 - 0.5)) < 1e-12);
+  // ...and a 10% push just shrinks both sides; it isn't worth anything itself.
+  assert.ok(Math.abs(evOf(0.45, 0.45, -110) - 0.9 * evOf(0.5, 0.5, -110)) < 1e-12);
+  assert.equal(evOf(0.5, 0.5, "x"), null);
+});
+
+test("fairProb is the win rate among bets that don't push", () => {
+  assert.equal(fairProb(0.45, 0.45), 0.5);
+  assert.equal(fairProb(0, 0), null);
+});
