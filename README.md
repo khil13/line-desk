@@ -15,7 +15,8 @@ branch → `main` / root**. It'll be live at `https://<you>.github.io/<repo>/`.
 ## Development
 
 The odds conversion, de-vig and normal-curve math live in `lib/odds-math.js`, and the live field
-diagram's coordinate math lives in `lib/field-geometry.js`, and the Card's per-pick breakdown in `lib/card-stats.js` — small, dependency-free modules that
+diagram's coordinate math lives in `lib/field-geometry.js`, the Card's per-pick breakdown in `lib/card-stats.js`, and ESPN's JSON parsing in
+`lib/espn-parse.js` — small, dependency-free modules that
 `index.html` loads as plain `<script>` tags and that `ncaaf-line-desk.jsx` and the tests
 `require()`. They're the one place each piece of logic is defined, so fixing a bug there fixes it
 everywhere.
@@ -59,6 +60,12 @@ and watching, and filterable by market. Each pick shows its numbers side by side
 model, the edge against the bar it had to clear, the fair price against the one on offer, and the
 value per unit — plus every book's price on that side and how the two teams rate (rank, opponent-
 adjusted offence and defence, schedule strength). The written reasons sit underneath.
+
+**The Record.** Every play the Card makes is logged with the number and price it saw, graded
+against the final score, and re-priced against each new board until kickoff. That last step
+gives closing line value: what the bet was worth against the final pre-game market, vig
+removed. It settles in dozens of bets where win-loss needs hundreds. The record lives in the
+browser, so save a backup file from the Record tab now and then; restoring merges it back in.
 
 **Board scan.** Sweeps every game and sorts by how far apart the books are, flagging gaps that
 cross key numbers (3, 7, 10, 14).
@@ -112,7 +119,11 @@ These are real and worth understanding before you bet anything.
   normally distributed (σ = 16) and totals likewise (σ = 10.5). Football margins are not smooth
   — 3 and 7 occur far more often than a bell curve allows. Treat small edges near key numbers
   as model error, not opportunity.
-- **Whole-number lines can push.** The probabilities here ignore ties.
+- **Pushes are priced, but only roughly for totals.** Spreads use a margin distribution with
+  extra weight on 3, 7, 10 and 14, so a whole-number spread carries a realistic push chance.
+  Totals spread a plain curve over whole numbers, which gets the push chance on a whole-number
+  total about right but gives no extra weight to common final totals. A push is counted as
+  money back, not half a win.
 - **EV is measured against your chosen benchmark.** A positive number means one book disagrees
   with the others, not that the market is wrong. Against a retail consensus it's mostly
   measuring vig. A sharp book as the benchmark is what makes the column mean something.
