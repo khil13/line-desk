@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 const OddsMath = require("./lib/odds-math.js");
 const FieldGeometry = require("./lib/field-geometry.js");
+const CardStats = require("./lib/card-stats.js");
 
 /* Schedules, scores and model win probabilities are real, from a live
    sports feed, captured at SNAPSHOT. Odds are yours to enter. */
@@ -412,6 +413,7 @@ const { toProb, toAmerican, payout, fmtOdds, devigPower, normCdf, invNorm,
         modelLine, trim, SIG_M, middleWindow } = OddsMath;
 const SIG_T = 10.5;
 const { yardToX, ballYards, lineToGainYards } = FieldGeometry;
+const { pickStats, bookLines } = CardStats;
 
 /* ────────────────────────────────────────────────
    Football margins are not a bell curve. Games end
@@ -921,6 +923,39 @@ input.f[data-best="1"] { border-color:var(--turf); background:#0E2418; }
 .playcard.lean { border-left-color:#E3B448; background:var(--bg); }
 .playcard.lean .why b { color:#E3B448; }
 .shortfall { margin:0 0 8px; font-size:12px; line-height:1.5; color:#E3B448; }
+.pstats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin:0 0 10px; }
+.pstats span { display:flex; flex-direction:column; background:var(--bg); border-radius:2px;
+  padding:7px 8px; border-top:2px solid var(--edge); min-width:0; }
+.pstats span.hit { border-top-color:var(--turf); }
+.pstats span.miss { border-top-color:#E3B448; }
+.pstats i { font-style:normal; font-size:9.5px; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--dim); }
+.pstats b { font-family:'Oswald',sans-serif; font-weight:600; font-size:16px; color:var(--fg);
+  line-height:1.3; }
+.pstats em { font-style:normal; font-size:10.5px; color:var(--dim); line-height:1.3; }
+.playcard.lean .pstats span { background:var(--card); }
+.pbooks { display:flex; flex-wrap:wrap; gap:5px; margin:0 0 10px; }
+.pbooks span { font-family:'Oswald',sans-serif; font-size:12px; padding:3px 7px;
+  border:1px solid var(--edge); border-radius:2px; color:var(--dim); }
+.pbooks span[data-best="1"] { border-color:var(--turf); color:var(--fg); }
+.pbooks span i { font-style:normal; margin-right:5px; font-size:10px; letter-spacing:.05em; }
+.mwrap { overflow-x:auto; margin:0 0 10px; }
+.mtab { width:100%; border-collapse:collapse; font-size:12px; }
+.mtab th { font-weight:400; font-size:9.5px; text-transform:uppercase; letter-spacing:.05em;
+  color:var(--dim); text-align:right; padding:0 0 4px 8px; }
+.mtab th:first-child, .mtab td:first-child { text-align:left; padding-left:0; }
+.mtab td { font-family:'Oswald',sans-serif; text-align:right; padding:5px 0 5px 8px;
+  border-top:1px solid var(--edge); white-space:nowrap; }
+.mtab td em { font-family:'Barlow',sans-serif; font-style:normal; color:var(--dim); font-size:11px; }
+.mtab td.nr { color:var(--dim); text-align:left; }
+.whyfold summary { cursor:pointer; font-family:'Oswald',sans-serif; font-size:10.5px;
+  text-transform:uppercase; letter-spacing:.07em; color:var(--dim); margin:0 0 6px; }
+.whyfold summary:focus-visible { outline:2px solid var(--turf); outline-offset:2px; }
+.whyhead { display:block; font-family:'Oswald',sans-serif; font-size:10.5px;
+  text-transform:uppercase; letter-spacing:.07em; color:var(--dim); margin:0 0 4px; }
+.wstat { color:var(--fg); }
+.cardseg { margin:14px 0 4px; }
+.cardseg .seg { flex-wrap:wrap; }
 .tag-ml { font-size:11px; letter-spacing:.08em; color:var(--bg); background:var(--turf);
   padding:2px 5px; border-radius:2px; vertical-align:3px; }
 .bars { display:flex; align-items:flex-end; gap:2px; height:90px; margin-top:10px; }
@@ -1257,7 +1292,7 @@ function assess(game, sum) {
     fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — that size means the model is broken, not the book`);
 
   return { kind: "spread", game, res, gap, sideHome, best, L, ev, pModel, hp, onKey, fail,
-           espnMu, powerMu, band, both,
+           espnMu, powerMu, band, both, modelMu, need,
            books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            side: sideHome ? game.home : game.away,
            price: price,
@@ -1582,7 +1617,7 @@ function assessTotal(game, sum) {
   if (over && drag >= 2)
     fail.push(`this is an over into conditions worth about ${drag.toFixed(1)} points against it`);
 
-  return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail,
+  return { kind: "total", game, res, gap, over, best, line, price, ev, pModel, fail, need: 1.5 + thin,
            drag, wx, outs, qbOut, pace: proj.pace,
            books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            games: proj.games, proj: proj.total,
@@ -1629,7 +1664,7 @@ function assessML(game, sum) {
   if (ev > 0.30)
     fail.push(`${(ev * 100).toFixed(0)}% expected value isn't real — that size means the model is broken, not the book`);
 
-  return { kind: "moneyline", game, res, ev, pModel, edge, best, price, fail,
+  return { kind: "moneyline", game, res, ev, pModel, edge, best, price, fail, need: 0.04 + thin,
            books: res.count, conf: res.count >= 3 ? "Strong" : res.count === 2 ? "Fair" : "Thin",
            sideHome, side: sideHome ? game.home : game.away,
            score: ev * Math.min(1, res.count / 4) * 0.85 };
@@ -1745,6 +1780,59 @@ function LiveGame({ game, live }) {
   );
 }
 
+/* The structured half of a pick: the numbers in a grid, every book's price on
+   that side, and how the two teams rate. The prose reasons stay underneath. */
+function PickDetail({ c }) {
+  const rows = pickStats(c);
+  const books = bookLines(c);
+  const rat = EMP && EMP.rat ? EMP.rat : null;
+  const teams = [["a", c.game.aAb, c.game.aRec], ["h", c.game.hAb, c.game.hRec]];
+  const sgn = (x) => (x >= 0 ? "+" : "") + x.toFixed(1);
+  return (
+    <>
+      <div className="pstats">
+        {rows.map((r) => (
+          <span key={r.k} className={r.ok === false ? "miss" : r.ok ? "hit" : ""}>
+            <i>{r.k}</i><b>{r.v}</b>{r.note && <em>{r.note}</em>}
+          </span>
+        ))}
+      </div>
+      {books.length > 1 && (
+        <div className="pbooks">
+          {books.map((b) => (
+            <span key={b.book} data-best={b.best ? "1" : "0"}>
+              <i>{b.book}</i>{b.line ? b.line + " " : ""}{b.price}
+            </span>
+          ))}
+        </div>
+      )}
+      {rat && (rat[c.game.aAb] || rat[c.game.hAb]) && (
+        <div className="mwrap">
+          <table className="mtab">
+            <thead>
+              <tr><th>Team</th><th>Rank</th><th>Rating</th><th>Adj off</th><th>Adj def</th><th>Sched</th></tr>
+            </thead>
+            <tbody>
+              {teams.map(([s, ab, rec]) => {
+                const t = rat[ab];
+                return (
+                  <tr key={s}>
+                    <td style={{ color: tc(c.game, s) }}>{ab}{rec ? <em> {rec}</em> : null}</td>
+                    {t
+                      ? <><td>#{t.rank}</td><td>{sgn(t.r)}</td><td>{t.off.toFixed(1)}</td>
+                          <td>{t.def.toFixed(1)}</td><td>{sgn(t.sos)}</td></>
+                      : <td className="nr" colSpan={5}>too few games to rate</td>}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
+  );
+}
+
 function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, day, scope, logPicks, autoCal }) {
   const swept = Object.keys(boardOdds).length > 0;
   // The sweep runs itself at the app level, so nothing to trigger here.
@@ -1803,6 +1891,19 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
   const plays = cands.filter((c) => c.fail.length === 0).sort((a, b) => b.score - a.score);
   const leans = cands.filter((c) => c.fail.length === 1).sort(byQuality);
   const watch = cands.filter((c) => c.fail.length >= 2).sort(byQuality);
+
+  // Filter by market. Picks are still logged and counted across all of them;
+  // this only changes what's on screen.
+  const [mkt, setMktRaw] = useState(() => {
+    try { return localStorage.getItem("ld:cardMarket") || "all"; } catch (e) { return "all"; }
+  });
+  const setMkt = (v) => {
+    setMktRaw(v);
+    try { localStorage.setItem("ld:cardMarket", v); } catch (e) { /* session only */ }
+  };
+  const shown = (c) => mkt === "all" || c.kind === mkt;
+  const nOf = (k) => cands.filter((c) => c.kind === k).length;
+  const vPlays = plays.filter(shown), vLeans = leans.filter(shown), vWatch = watch.filter(shown);
 
   // Record the plays as soon as they're produced, so the bar is auditable.
   useEffect(() => {
@@ -1926,14 +2027,27 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </div>
       )}
 
-      {plays.length > 0 && (
+      {swept && cands.length > 0 && (
+        <div className="cardseg">
+          <Seg value={mkt} onChange={setMkt} options={[
+            { v: "all", l: `All ${cands.length}` },
+            { v: "spread", l: `Spread ${nOf("spread")}` },
+            { v: "moneyline", l: `Moneyline ${nOf("moneyline")}` },
+            { v: "total", l: `Over/under ${nOf("total")}` }]} />
+        </div>
+      )}
+      {swept && mkt !== "all" && vPlays.length + vLeans.length + vWatch.length === 0 && (
+        <p className="empty">Nothing judged in this market for the games left.</p>
+      )}
+
+      {vPlays.length > 0 && (
         <p className="tier">
           Plays · cleared every test · <span style={{ color: "#5FD69B" }}>Strong</span> means three
           or more books agree the line is real, <span style={{ color: "#9AA5B5" }}>Thin</span> means
           one book and a correspondingly higher bar
         </p>
       )}
-      {plays.map((c, i) => (
+      {vPlays.map((c, i) => (
         <div className="playcard" key={c.kind + c.game.id}>
           <span className="pnum">{i + 1}</span>
           <div className="pbody">
@@ -1942,6 +2056,8 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
               <span className={"conf " + c.conf.toLowerCase()}>{c.conf}</span>
               {c.best.bk.n} · {c.game.away} at {c.game.home}
             </span>
+            <PickDetail c={c} />
+            <span className="whyhead">Why</span>
             {reasons(c)}
             {c.alt && <p className="altnote">{c.alt}</p>}
             <button className="opengame" onClick={() => onOpen(c.game.id)}>
@@ -1951,10 +2067,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </div>
       ))}
 
-      {leans.length > 0 && (
+      {vLeans.length > 0 && (
         <>
           <p className="tier amber">Leans · best available, but each falls short on one thing</p>
-          {leans.map((c) => (
+          {vLeans.map((c) => (
             <div className="playcard lean" key={c.kind + c.game.id}>
               <div className="pbody">
                 {headline(c)}
@@ -1963,7 +2079,11 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
                   {c.best.bk.n} · {c.game.away} at {c.game.home}
                 </span>
                 <p className="shortfall">Falls short: {c.fail[0]}.</p>
-                {reasons(c)}
+                <PickDetail c={c} />
+                <details className="whyfold">
+                  <summary>Why</summary>
+                  {reasons(c)}
+                </details>
                 {c.alt && <p className="altnote">{c.alt}</p>}
                 <button className="opengame" onClick={() => onOpen(c.game.id)}>
                   Open the full game →
@@ -1974,10 +2094,10 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
         </>
       )}
 
-      {watch.length > 0 && (
+      {vWatch.length > 0 && (
         <>
           <p className="tier">Watching · more than one thing wrong</p>
-          {watch.map((c) => (
+          {vWatch.map((c) => (
             <div className="gm" key={c.kind + c.game.id}
               style={{ borderLeftColor: tc(c.game, "h"), cursor: "default" }}>
               <span className="who">
@@ -1985,7 +2105,13 @@ function CardTab({ board, boardOdds, entries, onOpen, sweeping, prog, runSweep, 
                   <span style={{ color: tc(c.game, "a") }}>{c.game.aAb}</span><i>at</i>
                   <span style={{ color: tc(c.game, "h") }}>{c.game.hAb}</span>
                 </span>
-                <span className="meta">{c.side} — {c.fail.join("; ")}</span>
+                <span className="meta">
+                  <b className="wstat">
+                    {c.side}{c.kind === "spread" ? ` ${c.L > 0 ? "+" : "−"}${trim(Math.abs(c.L))}`
+                      : c.kind === "moneyline" ? " ML" : ""} {fmtOdds(parseFloat(c.price))}
+                  </b>{" "}
+                  · value {c.ev >= 0 ? "+" : "−"}{Math.abs(c.ev * 100).toFixed(1)}% — {c.fail.join("; ")}
+                </span>
               </span>
             </div>
           ))}
@@ -3027,8 +3153,14 @@ export default function LineDesk() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await window.storage.get("linedesk:odds");
-        if (r && r.value) setEntries(JSON.parse(r.value));
+        // storage.get throws on a missing key, so each read gets its own try.
+        // Odds used to share the outer one: anyone who'd never typed in a line
+        // lost their calibration, pace data, saved board and pick record on
+        // every load — and the next logged pick then overwrote that record.
+        try {
+          const r = await window.storage.get("linedesk:odds");
+          if (r && r.value) setEntries(JSON.parse(r.value));
+        } catch (e) { /* no hand-entered odds */ }
         try {
           const m = await window.storage.get("linedesk:margins");
           if (m && m.value) { const d = JSON.parse(m.value); EMP = d; setEmp(d); }
