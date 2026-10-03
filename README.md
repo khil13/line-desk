@@ -15,7 +15,7 @@ branch → `main` / root**. It'll be live at `https://<you>.github.io/<repo>/`.
 ## Development
 
 The odds conversion, de-vig and normal-curve math live in `lib/odds-math.js`, and the live field
-diagram's coordinate math lives in `lib/field-geometry.js` — small, dependency-free modules that
+diagram's coordinate math lives in `lib/field-geometry.js`, and the Card's per-pick breakdown in `lib/card-stats.js` — small, dependency-free modules that
 `index.html` loads as plain `<script>` tags and that `ncaaf-line-desk.jsx` and the tests
 `require()`. They're the one place each piece of logic is defined, so fixing a bug there fixes it
 everywhere.
@@ -53,6 +53,12 @@ not just its width.
 **Model comparison.** Plots the feed's model, a second model you supply (ESPN's Matchup
 Predictor works), the opening line, and the current market on a shared scale. The distance
 between the two models is your honest uncertainty band.
+
+**The Card.** Every spread, moneyline and over/under left in the week, ranked into plays, leans
+and watching, and filterable by market. Each pick shows its numbers side by side — market against
+model, the edge against the bar it had to clear, the fair price against the one on offer, and the
+value per unit — plus every book's price on that side and how the two teams rate (rank, opponent-
+adjusted offence and defence, schedule strength). The written reasons sit underneath.
 
 **Board scan.** Sweeps every game and sorts by how far apart the books are, flagging gaps that
 cross key numbers (3, 7, 10, 14).
